@@ -498,6 +498,7 @@ func ProvideSchedulerSnapshotService(
 ) *SchedulerSnapshotService {
 	svc := NewSchedulerSnapshotService(cache, outboxRepo, accountRepo, groupRepo, cfg)
 	svc.Start()
+	StartForkUsageShare(accountRepo, cfg) // [fork] usage share
 	return svc
 }
 

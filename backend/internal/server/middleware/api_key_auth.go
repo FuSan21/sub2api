@@ -178,6 +178,12 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		// authenticated key and must remain available after the completed
 		// generation consumes the key's remaining balance.
 		skipBilling := c.Request.URL.Path == "/v1/usage" || billingInfoRequest || isAsyncImageTaskRead(c.Request.Method, c.Request.URL.Path)
+		if !skipBilling && apiKey.GroupID != nil { // [fork] usage share
+			if msg, blocked := service.ForkUsageShareBlocked(*apiKey.GroupID, apiKey.User.ID); blocked {
+				AbortWithError(c, http.StatusTooManyRequests, "USAGE_SHARE_EXCEEDED", msg)
+				return
+			}
+		}
 
 		// ── 4. SimpleMode → early return ─────────────────────────────
 
