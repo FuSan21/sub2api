@@ -388,6 +388,15 @@
                 <Icon name="edit" size="sm" />
                 <span class="text-xs">{{ t("common.edit") }}</span>
               </button>
+              <!-- [fork] per-group account priority -->
+              <button
+                data-testid="group-account-priorities"
+                @click="handleAccountPriorities(row)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400"
+              >
+                <Icon name="arrowsUpDown" size="sm" />
+                <span class="text-xs">Priority</span>
+              </button>
               <button
                 v-if="!authStore.isSimpleMode"
                 data-testid="group-duplicate"
@@ -4275,6 +4284,12 @@
     </BaseDialog>
 
     <!-- Group Rate Multipliers Modal -->
+    <!-- [fork] per-group account priority -->
+    <ForkGroupAccountPrioritiesModal
+      :show="showAccountPrioritiesModal"
+      :group="accountPrioritiesGroup"
+      @close="showAccountPrioritiesModal = false"
+    />
     <GroupRateMultipliersModal
       :show="showRateMultipliersModal"
       :group="rateMultipliersGroup"
@@ -4330,6 +4345,7 @@ import { platformLabel } from "@/utils/platformColors";
 import Icon from "@/components/icons/Icon.vue";
 import GroupI18nField from "@/components/admin/group/GroupI18nField.vue";
 import GroupRateMultipliersModal from "@/components/admin/group/GroupRateMultipliersModal.vue";
+import ForkGroupAccountPrioritiesModal from "@/components/admin/group/ForkGroupAccountPrioritiesModal.vue"; // [fork]
 import GroupRPMOverridesModal from "@/components/admin/group/GroupRPMOverridesModal.vue";
 import GroupCapacityBadge from "@/components/common/GroupCapacityBadge.vue";
 import ReasoningEffortPolicyFields from "@/components/admin/group/ReasoningEffortPolicyFields.vue";
@@ -6473,6 +6489,14 @@ const removeEditMessagesDispatchMapping = (row: MessagesDispatchMappingRow) => {
   if (index !== -1) {
     editForm.exact_model_mappings.splice(index, 1);
   }
+};
+
+// [fork] per-group account priority
+const showAccountPrioritiesModal = ref(false);
+const accountPrioritiesGroup = ref<AdminGroup | null>(null);
+const handleAccountPriorities = (group: AdminGroup) => {
+  accountPrioritiesGroup.value = group;
+  showAccountPrioritiesModal.value = true;
 };
 
 const handleRateMultipliers = (group: AdminGroup) => {
