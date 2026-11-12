@@ -1,27 +1,13 @@
 <template>
   <!-- [fork] Usage share column on the admin Users page, styled like the Accounts usage windows -->
-  <div v-if="rows.length" class="min-w-[180px] space-y-1.5">
+  <div v-if="rows.length" class="min-w-[220px] space-y-1.5">
     <div v-for="s in rows" :key="s.group_id">
       <div v-if="rows.length > 1" class="mb-0.5 truncate text-[10px] text-gray-400" :title="s.group_name">
         {{ s.group_name }}
       </div>
       <div class="space-y-1">
-        <div :title="tooltip(s, '5h')">
-          <UsageProgressBar
-            label="5h"
-            :utilization="barPct(s.used_5h_pct, s.limit_5h_pct)"
-            :resets-at="s.next_drop_5h ?? null"
-            color="indigo"
-          />
-        </div>
-        <div :title="tooltip(s, '7d')">
-          <UsageProgressBar
-            label="7d"
-            :utilization="barPct(s.used_7d_pct, s.limit_7d_pct)"
-            :resets-at="s.next_drop_7d ?? null"
-            color="emerald"
-          />
-        </div>
+        <ForkUsageShareBar label="5h" :used="s.used_5h_pct" :limit="s.limit_5h_pct" :resets-at="s.next_drop_5h" color="indigo" />
+        <ForkUsageShareBar label="7d" :used="s.used_7d_pct" :limit="s.limit_7d_pct" :resets-at="s.next_drop_7d" color="emerald" />
       </div>
       <div v-if="s.blocked" class="mt-0.5 text-[10px] font-medium text-red-600 dark:text-red-400">
         blocked<template v-if="s.frees_at"> · frees {{ formatTime(s.frees_at) }}</template>
@@ -65,25 +51,12 @@ function ensureLoaded() {
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import UsageProgressBar from '@/components/account/UsageProgressBar.vue'
+import ForkUsageShareBar from './ForkUsageShareBar.vue'
 
 const props = defineProps<{ userId: number }>()
 
 ensureLoaded()
 const rows = computed(() => byUser.value[props.userId] ?? [])
-
-// With a limit the bar shows how much of the user's own allowance is used;
-// without one, how much of the whole pool.
-const barPct = (used: number, limit: number | null) =>
-  Math.round((limit !== null && limit > 0 && limit < 100 ? (used / limit) * 100 : used) * 10) / 10
-
-const tooltip = (s: UsageShareStatus, w: '5h' | '7d') => {
-  const used = w === '5h' ? s.used_5h_pct : s.used_7d_pct
-  const limit = w === '5h' ? s.limit_5h_pct : s.limit_7d_pct
-  const base = `${w}: ${used.toFixed(1)}% of the pool used`
-  if (limit === null || limit >= 100) return `${base} · no limit`
-  return `${base} · limit ${limit}% (${Math.max(0, limit - used).toFixed(1)}% left)`
-}
 
 const formatTime = (iso: string) =>
   new Date(iso).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
