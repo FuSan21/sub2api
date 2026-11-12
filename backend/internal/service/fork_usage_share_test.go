@@ -184,6 +184,22 @@ func TestUsageShareEnforcement(t *testing.T) {
 	_, blocked = ForkUsageShareBlocked(8, 4)
 	require.False(t, blocked)
 
+	// Status for the dashboard / status line.
+	st, err := ForkUsageShareStatusForGroup(context.Background(), 4, 7, "pool")
+	require.NoError(t, err)
+	require.True(t, st.Enforced)
+	require.Equal(t, 2, st.Accounts)
+	require.InDelta(t, 25, st.Used7dPct, 1e-9)
+	require.InDelta(t, 20, *st.Limit7dPct, 1e-9)
+	require.InDelta(t, 0, *st.Remaining7dPct, 1e-9)
+	require.Nil(t, st.Limit5hPct)
+	require.True(t, st.Blocked)
+	require.NotNil(t, st.FreesAt)
+	st, err = ForkUsageShareStatusForGroup(context.Background(), 1, 7, "pool")
+	require.NoError(t, err)
+	require.InDelta(t, 90, *st.Remaining7dPct, 1e-9)
+	require.False(t, st.Blocked)
+
 	// Stale snapshots fail open.
 	e.now = func() time.Time { return now.Add(time.Hour) }
 	_, blocked = ForkUsageShareBlocked(7, 4)

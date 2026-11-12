@@ -573,6 +573,11 @@
             <PlatformCostCell :usage="getPlatformUsage(row.id, 'antigravity')" />
           </template>
 
+          <!-- [fork] usage share -->
+          <template #cell-fork_usage_share="{ row }">
+            <ForkUserUsageShareCell :user-id="row.id" />
+          </template>
+
           <template #cell-concurrency="{ row }">
             <UserConcurrencyCell
               :current="row.current_concurrency ?? 0"
@@ -822,6 +827,7 @@ import PlatformUsageBreakdown from '@/components/user/PlatformUsageBreakdown.vue
 import PlatformCostCell from '@/components/user/PlatformCostCell.vue'
 import UserPlatformQuotaCell from '@/components/user/UserPlatformQuotaCell.vue'
 import UserCreateModal from '@/components/admin/user/UserCreateModal.vue'
+import ForkUserUsageShareCell from '@/components/admin/user/ForkUserUsageShareCell.vue' // [fork]
 import UserEditModal from '@/components/admin/user/UserEditModal.vue'
 import BulkEditUserModal from '@/components/admin/user/BulkEditUserModal.vue'
 import UserPlatformQuotaModal from '@/components/admin/user/UserPlatformQuotaModal.vue'
@@ -897,6 +903,7 @@ const allColumns = computed<Column[]>(() => [
   { key: 'usage_openai', label: t('admin.users.columns.usageOpenAI'), sortable: false },
   { key: 'usage_gemini', label: t('admin.users.columns.usageGemini'), sortable: false },
   { key: 'usage_antigravity', label: t('admin.users.columns.usageAntigravity'), sortable: false },
+  { key: 'fork_usage_share', label: 'Usage share', sortable: false }, // [fork]
   { key: 'concurrency', label: t('admin.users.columns.concurrency'), sortable: true },
   { key: 'status', label: t('admin.users.columns.status'), sortable: true },
   { key: 'last_active_at', label: t('admin.users.columns.lastActive'), sortable: true },

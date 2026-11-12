@@ -382,3 +382,37 @@ func (r *accountRepository) PruneUsageShare(ctx context.Context, before time.Tim
 	`, before)
 	return err
 }
+
+var _ service.UsageShareKeyGroupStore = (*accountRepository)(nil)
+
+func (r *accountRepository) ListUsageShareKeyGroups(ctx context.Context, userID *int64) ([]service.UsageShareKeyGroup, error) {
+	if r.sql == nil {
+		return nil, errUsageShareNoSQL
+	}
+	var uid sql.NullInt64
+	if userID != nil {
+		uid = sql.NullInt64{Int64: *userID, Valid: true}
+	}
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT DISTINCT k.user_id, g.id, g.name
+		FROM api_keys k
+		JOIN groups g ON g.id = k.group_id AND g.deleted_at IS NULL
+		JOIN users u ON u.id = k.user_id AND u.deleted_at IS NULL
+		WHERE k.deleted_at IS NULL AND ($1::bigint IS NULL OR k.user_id = $1)
+		ORDER BY k.user_id, g.id
+	`, uid)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]service.UsageShareKeyGroup, 0)
+	for rows.Next() {
+		var p service.UsageShareKeyGroup
+		if err := rows.Scan(&p.UserID, &p.GroupID, &p.GroupName); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

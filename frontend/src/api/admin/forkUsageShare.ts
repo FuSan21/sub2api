@@ -60,3 +60,29 @@ export async function setUsageShare(groupId: number, settings: UsageShareSetting
   const { data } = await apiClient.put<UsageShareReport>(`/admin/groups/${groupId}/usage-share`, settings)
   return data
 }
+
+export interface UsageShareStatus {
+  user_id: number
+  group_id: number
+  group_name: string
+  enforced: boolean
+  accounts: number
+  used_5h_pct: number
+  used_7d_pct: number
+  limit_5h_pct: number | null
+  limit_7d_pct: number | null
+  remaining_5h_pct: number | null
+  remaining_7d_pct: number | null
+  blocked: boolean
+  frees_at?: string
+}
+
+export async function getMyUsageShare(): Promise<UsageShareStatus[]> {
+  const { data } = await apiClient.get<UsageShareStatus[]>('/user/usage-share')
+  return data ?? []
+}
+
+export async function getAllUsersUsageShare(): Promise<UsageShareStatus[]> {
+  const { data } = await apiClient.get<UsageShareStatus[]>('/admin/usage-share/users')
+  return data ?? []
+}
