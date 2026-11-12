@@ -75,6 +75,8 @@ export interface UsageShareStatus {
   remaining_7d_pct: number | null
   blocked: boolean
   frees_at?: string
+  next_drop_5h?: string
+  next_drop_7d?: string
 }
 
 export async function getMyUsageShare(): Promise<UsageShareStatus[]> {

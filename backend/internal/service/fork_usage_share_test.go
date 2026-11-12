@@ -195,6 +195,8 @@ func TestUsageShareEnforcement(t *testing.T) {
 	require.Nil(t, st.Limit5hPct)
 	require.True(t, st.Blocked)
 	require.NotNil(t, st.FreesAt)
+	require.Equal(t, resetB, *st.NextDrop7d, "soonest reset among accounts with usage")
+	require.Nil(t, st.NextDrop5h)
 	st, err = ForkUsageShareStatusForGroup(context.Background(), 1, 7, "pool")
 	require.NoError(t, err)
 	require.InDelta(t, 90, *st.Remaining7dPct, 1e-9)

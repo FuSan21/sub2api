@@ -41,6 +41,9 @@ type UsageShareStatus struct {
 	Remaining7dPct *float64   `json:"remaining_7d_pct"`
 	Blocked        bool       `json:"blocked"`
 	FreesAt        *time.Time `json:"frees_at,omitempty"`
+	// Soonest reset of an account the user has usage on, i.e. when their usage next drops.
+	NextDrop5h *time.Time `json:"next_drop_5h,omitempty"`
+	NextDrop7d *time.Time `json:"next_drop_7d,omitempty"`
 }
 
 var errUsageShareUnavailable = infraerrors.ServiceUnavailable("USAGE_SHARE_UNAVAILABLE", "usage share is not available")
@@ -121,6 +124,7 @@ func (e *usageShareEngine) statuses(ctx context.Context, pairs []UsageShareKeyGr
 		st.Accounts = len(g.accountIDs)
 		if u := g.users[p.UserID]; u != nil {
 			st.Used5hPct, st.Used7dPct = u.pct[UsageWindow5h], u.pct[UsageWindow7d]
+			st.NextDrop5h, st.NextDrop7d = u.nextDrop(UsageWindow5h, now), u.nextDrop(UsageWindow7d, now)
 		}
 		st.Limit5hPct = g.settings.limitFor(p.UserID, UsageWindow5h)
 		st.Limit7dPct = g.settings.limitFor(p.UserID, UsageWindow7d)
@@ -155,6 +159,20 @@ func (e *usageShareEngine) statuses(ctx context.Context, pairs []UsageShareKeyGr
 		return out[i].GroupID < out[j].GroupID
 	})
 	return out, nil
+}
+
+func (u *usageShareUserView) nextDrop(window string, now time.Time) *time.Time {
+	var next *time.Time
+	for _, c := range u.contrib[window] {
+		if c.pct <= 0 || !c.resetAt.After(now) {
+			continue
+		}
+		if next == nil || c.resetAt.Before(*next) {
+			t := c.resetAt
+			next = &t
+		}
+	}
+	return next
 }
 
 func remainingPct(limit *float64, used float64) *float64 {
