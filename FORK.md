@@ -91,3 +91,10 @@ Measures each person's consumption in real account limits instead of dollars, an
 - Groups page → **Usage** (also in simple mode), or `GET/PUT /api/v1/admin/groups/:id/usage-share`.
 - Hooks: `GatewayService.isAccountSchedulableForModelSelection` (all Anthropic selection paths incl. sticky
   sessions), the API-key auth middleware (early 429), `ProvideSchedulerSnapshotService` (starts the engine).
+
+### `patch/version-display`
+
+- The version is `<upstream>+fusan`; upstream's update check parsed `21+fusan` as 0 and always showed
+  "a new version is available". Build metadata (`+…`) is now ignored when comparing.
+- In-app update and rollback are disabled for fork builds (they would swap in an upstream release binary).
+  Updates arrive through the `ghcr.io/fusan21/sub2api` image.
