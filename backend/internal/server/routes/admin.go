@@ -356,6 +356,8 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		groups.PUT("/:id/rpm-overrides", h.Admin.Group.BatchSetGroupRPMOverrides)
 		groups.DELETE("/:id/rpm-overrides", h.Admin.Group.ClearGroupRPMOverrides)
 		groups.GET("/:id/api-keys", h.Admin.Group.GetGroupAPIKeys)
+		groups.GET("/:id/account-priorities", h.Admin.Group.GetGroupAccountPriorities) // [fork]
+		groups.PUT("/:id/account-priorities", h.Admin.Group.SetGroupAccountPriorities) // [fork]
 	}
 }
 
