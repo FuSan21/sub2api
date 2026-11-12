@@ -442,6 +442,15 @@
                   t("admin.groups.rpmOverrides")
                 }}</span>
               </button>
+              <!-- [fork] usage share -->
+              <button
+                data-testid="group-usage-share"
+                @click="handleUsageShare(row)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-teal-600 dark:hover:bg-dark-700 dark:hover:text-teal-400"
+              >
+                <Icon name="chart" size="sm" />
+                <span class="text-xs">Usage</span>
+              </button>
               <button
                 @click="handleDelete(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
@@ -4289,6 +4298,12 @@
       @close="showRPMOverridesModal = false"
       @success="loadGroups"
     />
+    <!-- [fork] usage share -->
+    <ForkUsageShareModal
+      :show="showUsageShareModal"
+      :group="usageShareGroup"
+      @close="showUsageShareModal = false"
+    />
   </AppLayout>
 </template>
 
@@ -4331,6 +4346,7 @@ import Icon from "@/components/icons/Icon.vue";
 import GroupI18nField from "@/components/admin/group/GroupI18nField.vue";
 import GroupRateMultipliersModal from "@/components/admin/group/GroupRateMultipliersModal.vue";
 import GroupRPMOverridesModal from "@/components/admin/group/GroupRPMOverridesModal.vue";
+import ForkUsageShareModal from "@/components/admin/group/ForkUsageShareModal.vue"; // [fork]
 import GroupCapacityBadge from "@/components/common/GroupCapacityBadge.vue";
 import ReasoningEffortPolicyFields from "@/components/admin/group/ReasoningEffortPolicyFields.vue";
 import CodexManifestAccountsField from "@/components/admin/group/CodexManifestAccountsField.vue";
@@ -6478,6 +6494,14 @@ const removeEditMessagesDispatchMapping = (row: MessagesDispatchMappingRow) => {
 const handleRateMultipliers = (group: AdminGroup) => {
   rateMultipliersGroup.value = group;
   showRateMultipliersModal.value = true;
+};
+
+// [fork] usage share
+const showUsageShareModal = ref(false);
+const usageShareGroup = ref<AdminGroup | null>(null);
+const handleUsageShare = (group: AdminGroup) => {
+  usageShareGroup.value = group;
+  showUsageShareModal.value = true;
 };
 
 const handleRPMOverrides = (group: AdminGroup) => {

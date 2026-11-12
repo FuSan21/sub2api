@@ -1169,6 +1169,9 @@ func (s *GatewayService) isAccountSchedulableForModelSelection(ctx context.Conte
 	if account == nil {
 		return false
 	}
+	if !forkUsageShareAllowsAccount(ctx, account) { // [fork] usage share
+		return false
+	}
 	return account.IsSchedulableForModelWithContext(ctx, requestedModel)
 }
 
