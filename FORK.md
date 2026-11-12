@@ -70,3 +70,24 @@ Then: branch `patch/<name>` from the upstream tag that `fusan` is on, commit, an
 
 Both are applied in `SchedulerSnapshotService.ListSchedulableAccounts`, so every platform's
 scheduler sees them. Overrides are cached in-process for 10 s and invalidated on save.
+
+### `patch/usage-share`
+
+Measures each person's consumption in real account limits instead of dollars, and lets groups cap it.
+
+- **Attribution.** Anthropic reports every account's 5h and 7d utilization on each response (upstream
+  stores it in `accounts.extra`). Every 30 s the fork records changes (`fork_usage_samples`) and splits each
+  rise across the users who made requests on that account since the previous rise, weighted by
+  API-equivalent cost (`usage_logs.total_cost`), into `fork_usage_attributions`. A single active user gets the
+  whole rise; a rise with no sub2api traffic is stored as **outside** usage (user NULL). On first start the
+  current windows are backfilled by cost ratio (`estimated = true`).
+- **Consumption** of a user in a group = Σ their share of each group account's *current* window / number of
+  active Anthropic OAuth accounts in the group, i.e. % of the pool. It follows each account's own reset.
+- **Limits** (`fork_usage_share_settings`, `fork_usage_share_limits`): per group default 5h/7d % and per-user
+  overrides. Over a limit, a user may only use accounts that still have ≥ X% left and reset within Y
+  (defaults 40% / 24 h for 7d, 40% / 60 min for 5h) — capacity that would otherwise be wasted. With no such
+  account the request gets `429 USAGE_SHARE_EXCEEDED` and the time usage frees up. Enforcement fails open
+  when data is older than 5 minutes.
+- Groups page → **Usage** (also in simple mode), or `GET/PUT /api/v1/admin/groups/:id/usage-share`.
+- Hooks: `GatewayService.isAccountSchedulableForModelSelection` (all Anthropic selection paths incl. sticky
+  sessions), the API-key auth middleware (early 429), `ProvideSchedulerSnapshotService` (starts the engine).
