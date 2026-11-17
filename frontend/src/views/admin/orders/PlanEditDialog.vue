@@ -64,6 +64,7 @@
         <textarea v-model="planFeaturesText" rows="3" class="input" :placeholder="t('payment.admin.featuresPlaceholder')"></textarea>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.featuresHint') }}</p>
       </div>
+      <ForkPlanQuotaFields ref="forkPlanQuota" :show="show" :plan-id="plan?.id ?? null" /><!-- [fork] usage share -->
       <div class="flex items-center gap-3">
         <label class="text-sm text-gray-700 dark:text-gray-300">{{ t('payment.admin.forSale') }}</label>
         <button
@@ -105,6 +106,7 @@ import Select from '@/components/common/Select.vue'
 import Icon from '@/components/icons/Icon.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
 import { platformTextClass } from '@/utils/platformColors'
+import ForkPlanQuotaFields from '@/components/admin/payment/ForkPlanQuotaFields.vue' // [fork] usage share
 
 const props = defineProps<{
   show: boolean
@@ -124,6 +126,7 @@ const appStore = useAppStore()
 const saving = ref(false)
 const planForm = reactive({ name: '', group_id: null as number | null, description: '', price: 0, original_price: 0, currency: '', validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
 const planFeaturesText = ref('')
+const forkPlanQuota = ref<InstanceType<typeof ForkPlanQuotaFields> | null>(null) // [fork] usage share
 
 const validityUnitOptions = computed(() => [
   { value: 'days', label: t('payment.admin.days') },
@@ -219,6 +222,7 @@ async function handleSavePlan() {
     const data = buildPlanPayload()
     if (props.plan) { await adminPaymentAPI.updatePlan(props.plan.id, data) }
     else { await adminPaymentAPI.createPlan(data) }
+    await forkPlanQuota.value?.save(props.plan?.id ?? null, planForm) // [fork] usage share
     appStore.showSuccess(t('common.saved'))
     emit('close')
     emit('saved')
