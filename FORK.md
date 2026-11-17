@@ -47,6 +47,8 @@ Keep upstream files nearly untouched so merges stay clean:
 - put the code in new files prefixed with `fork_` (Go) / `Fork` / `fork` (frontend),
 - reach new methods through type assertions instead of changing upstream interfaces or wire DI,
 - mark the few hook lines in upstream files with `// [fork]` / `<!-- [fork] -->`,
+- make hooks *inserted* lines that call into fork code; don't rewrite upstream lines (an edited
+  `return` conflicts whenever upstream touches it, an inserted call usually merges cleanly),
 - name migrations `backend/migrations/fork_NNN_*.sql` (they sort after upstream's numbered ones,
   and upstream simply ignores the extra tables),
 - hardcode English UI strings instead of editing the upstream locale files.
@@ -69,7 +71,9 @@ Then: branch `patch/<name>` from the upstream tag that `fusan` is on, commit, an
   behave as upstream.
 
 Both are applied in `SchedulerSnapshotService.ListSchedulableAccounts`, so every platform's
-scheduler sees them. Overrides are cached in-process for 10 s and invalidated on save.
+scheduler sees them. The hook is one inserted `if` at the top of that function: it re-enters the
+upstream body with a bypass marker in the context and post-processes the result
+(`forkListSchedulableAccounts`). Overrides are cached in-process for 10 s and invalidated on save.
 
 ### `patch/usage-share`
 

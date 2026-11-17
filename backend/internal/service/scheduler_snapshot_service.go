@@ -219,6 +219,9 @@ func (s *SchedulerSnapshotService) Stop() {
 }
 
 func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) ([]Account, bool, error) {
+	if accounts, useMixed, handled, err := s.forkListSchedulableAccounts(ctx, groupID, platform, hasForcePlatform); handled { // [fork]
+		return accounts, useMixed, err
+	}
 	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
 	mode := s.resolveMode(platform, hasForcePlatform)
 	bucket := s.bucketFor(groupID, platform, mode)
@@ -234,7 +237,7 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 		if err != nil {
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache read failed: bucket=%s err=%v", bucket.String(), err)
 		} else if hit {
-			return s.applyForkGroupScheduling(ctx, groupID, cached), useMixed, nil // [fork]
+			return cached, useMixed, nil
 		}
 	}
 
@@ -242,7 +245,7 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 	if err != nil {
 		return nil, useMixed, err
 	}
-	return s.applyForkGroupScheduling(ctx, groupID, accounts), useMixed, nil // [fork]
+	return accounts, useMixed, nil
 }
 
 // readSnapshotAccounts 读取 bucket 快照，只返回当前可调度的账号；缓存实现能直接返回值切片时直接使用该切片。

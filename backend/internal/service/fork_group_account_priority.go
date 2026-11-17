@@ -12,8 +12,9 @@ package service
 // upstream behaviour.
 //
 // Both are applied to the account copies returned by
-// SchedulerSnapshotService.ListSchedulableAccounts, so every platform
-// scheduler sees them without further changes.
+// SchedulerSnapshotService.ListSchedulableAccounts (via the one-line hook that
+// calls forkListSchedulableAccounts), so every platform scheduler sees them
+// without further changes.
 
 import (
 	"context"
@@ -90,6 +91,28 @@ func (c *groupAccountPriorityCache) invalidate(groupID int64) {
 	c.mu.Lock()
 	delete(c.entries, groupID)
 	c.mu.Unlock()
+}
+
+// forkSchedulingBypassKey marks the inner call made by forkListSchedulableAccounts
+// so the hook at the top of ListSchedulableAccounts lets it run the upstream body.
+type forkSchedulingBypassKey struct{}
+
+// forkListSchedulableAccounts wraps the upstream ListSchedulableAccounts: it
+// re-enters it with a bypass marker and post-processes the result. The hook in
+// upstream code is a single inserted line, so upstream refactors of the
+// function body don't conflict with the fork. handled=false means "run upstream
+// as-is" (ungrouped keys, or the inner call).
+func (s *SchedulerSnapshotService) forkListSchedulableAccounts(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) (accounts []Account, useMixed bool, handled bool, err error) {
+	if groupID == nil || *groupID <= 0 || ctx.Value(forkSchedulingBypassKey{}) != nil {
+		return nil, false, false, nil
+	}
+	accounts, useMixed, err = s.ListSchedulableAccounts(context.WithValue(ctx, forkSchedulingBypassKey{}, true), groupID, platform, hasForcePlatform)
+	if err != nil {
+		return accounts, useMixed, true, err
+	}
+	// Upstream hands every caller its own slice of Account values, so it is a
+	// private copy as applyForkGroupScheduling requires.
+	return s.applyForkGroupScheduling(ctx, groupID, accounts), useMixed, true, nil
 }
 
 // applyForkGroupScheduling scopes accounts to the group (simple mode) and
