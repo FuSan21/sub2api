@@ -108,6 +108,8 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          # The upstream remote added above makes gh default to Wei-Shaw/sub2api; pin to the fork.
+          GH_REPO: ${{ github.repository }}
         run: |
           title="fork-release failed"
           [ -f conflict.md ] && title="Upstream merge conflict" || echo "Sync or tests failed." > conflict.md
