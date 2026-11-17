@@ -30,14 +30,15 @@ func TestNormalizeClaudeTier(t *testing.T) {
 	require.Equal(t, UsageTierMax5x, tier("claude_max", "default_claude_max_5x", true, false))
 	require.Equal(t, UsageTierPro, tier("claude_pro", "default_claude_ai", false, true))
 	require.Equal(t, UsageTierPro, tier("", "", false, true))
-	require.Equal(t, "claude_team/default_claude_ai", tier("claude_team", "default_claude_ai", false, false))
+	require.Equal(t, UsageTierPro, tier("claude_free", "default_claude_ai", false, false), "Pro rate tier wins over org type")
+	require.Equal(t, "claude_team/default_claude_team", tier("claude_team", "default_claude_team", false, false))
 	require.Equal(t, "unknown", tier("", "", false, false))
 }
 
 func TestUsageAccountCapacityWeight(t *testing.T) {
 	s := func(v string) *string { return &v }
 	require.Equal(t, 1.0, UsageAccountCapacity{}.weight(UsageWindow5h), "unknown tier counts as one Pro")
-	require.Equal(t, 20.0, UsageAccountCapacity{DetectedTier: s(UsageTierMax20x)}.weight(UsageWindow7d))
+	require.Equal(t, 10.0, UsageAccountCapacity{DetectedTier: s(UsageTierMax20x)}.weight(UsageWindow7d), "Ultra is 10x Pro")
 	require.Equal(t, 1.0, UsageAccountCapacity{DetectedTier: s("claude_team/x")}.weight(UsageWindow7d))
 	c := UsageAccountCapacity{DetectedTier: s(UsageTierMax5x), Weight7d: f64(4)}
 	require.Equal(t, 5.0, c.weight(UsageWindow5h))
@@ -108,7 +109,7 @@ func (s *usageShareStoreStub) ApplyPlanQuota(context.Context, int64, int64, int6
 
 func TestUsageQuotaEnforcement(t *testing.T) {
 	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
-	resetA := now.Add(3 * 24 * time.Hour) // account 1 (Max 20x) resets in 3 days
+	resetA := now.Add(3 * 24 * time.Hour) // account 1 (Ultra, 10x) resets in 3 days
 	resetB := now.Add(10 * time.Hour)     // account 2 (Pro) resets in 10 hours
 	id := func(v int64) *int64 { return &v }
 	tier := func(v string) *string { return &v }
@@ -121,11 +122,11 @@ func TestUsageQuotaEnforcement(t *testing.T) {
 		},
 		groups: map[int64][]int64{group: {1, 2}},
 		subs: []UsageQuotaSubscription{
-			{ID: 40, UserID: 4, GroupID: group, GroupName: "pool", Quota: UsageQuota{Quota7dX: f64(2)}, Source: UsageQuotaSourcePlan},
+			{ID: 40, UserID: 4, GroupID: group, GroupName: "pool", Quota: UsageQuota{Quota7dX: f64(1)}, Source: UsageQuotaSourcePlan},
 			{ID: 10, UserID: 1, GroupID: group, GroupName: "pool", Quota: UsageQuota{Quota7dX: f64(10)}, Source: UsageQuotaSourceAdmin},
 		},
 		sums: []UsageAttributionSum{
-			// user 4: 10% of the Max 20x (2x) + 20% of the Pro (0.2x) = 2.2x
+			// user 4: 10% of the Ultra (1x) + 20% of the Pro (0.2x) = 1.2x
 			{AccountID: 1, Window: UsageWindow7d, ResetAt: resetA, UserID: id(4), GroupID: id(group), Delta: 0.10},
 			{AccountID: 2, Window: UsageWindow7d, ResetAt: resetB, UserID: id(4), GroupID: id(group), Delta: 0.20},
 			// user 4 in another group doesn't count against this subscription
@@ -144,10 +145,10 @@ func TestUsageQuotaEnforcement(t *testing.T) {
 	snap := e.snapshot.Load()
 
 	sub4, sub1 := snap.subFor(4, group), snap.subFor(1, group)
-	require.InDelta(t, 2.2, sub4.used(UsageWindow7d), 1e-9)
-	require.InDelta(t, 4.0, sub1.used(UsageWindow7d), 1e-9)
+	require.InDelta(t, 1.2, sub4.used(UsageWindow7d), 1e-9)
+	require.InDelta(t, 2.0, sub1.used(UsageWindow7d), 1e-9)
 	require.Nil(t, snap.subFor(5, group), "no subscription")
-	require.InDelta(t, 21, snap.capacity(group, UsageWindow7d), 1e-9)
+	require.InDelta(t, 11, snap.capacity(group, UsageWindow7d), 1e-9)
 
 	require.Equal(t, []string{UsageWindow7d}, sub4.exceeded())
 	require.Empty(t, sub1.exceeded())
@@ -156,7 +157,7 @@ func TestUsageQuotaEnforcement(t *testing.T) {
 	require.False(t, snap.accountHasSpare(1, []string{UsageWindow7d}, now))
 	require.True(t, snap.accountHasSpare(2, []string{UsageWindow7d}, now))
 
-	// freesAt: dropping account 2's 0.2x (resets first) leaves 2.0x, not below 2; then account 1
+	// freesAt: dropping account 2's 0.2x (resets first) leaves 1.0x, not below 1; then account 1
 	require.Equal(t, resetA, sub4.freesAt(UsageWindow7d, now))
 
 	activeUsageShare.Store(e)
@@ -175,7 +176,7 @@ func TestUsageQuotaEnforcement(t *testing.T) {
 	require.NoError(t, e.rebuildLocked(context.Background()))
 	msg, blocked := ForkUsageShareBlocked(group, 4)
 	require.True(t, blocked)
-	require.Contains(t, msg, "weekly 2.20x of 2.00x")
+	require.Contains(t, msg, "weekly 1.20x of 1.00x")
 
 	// Other subscriptions, users without one, and other groups are unaffected.
 	for _, c := range [][2]int64{{group, 1}, {group, 5}, {9, 4}} {
@@ -189,7 +190,7 @@ func TestUsageQuotaEnforcement(t *testing.T) {
 	require.Equal(t, int64(40), *st.SubscriptionID)
 	require.Equal(t, UsageQuotaSourcePlan, st.QuotaSource)
 	require.Equal(t, 2, st.Accounts)
-	require.InDelta(t, 2.2, st.Used7dX, 1e-9)
+	require.InDelta(t, 1.2, st.Used7dX, 1e-9)
 	require.InDelta(t, 0, *st.Remaining7dX, 1e-9)
 	require.Nil(t, st.Quota5hX)
 	require.True(t, st.Blocked)
@@ -200,7 +201,7 @@ func TestUsageQuotaEnforcement(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, st.SubscriptionID)
 	require.False(t, st.Enforced)
-	require.InDelta(t, 2.0, st.Used7dX, 1e-9)
+	require.InDelta(t, 1.0, st.Used7dX, 1e-9)
 
 	all, err := ForkUsageShareStatuses(context.Background(), nil)
 	require.NoError(t, err)
@@ -208,11 +209,11 @@ func TestUsageQuotaEnforcement(t *testing.T) {
 
 	rep, err := e.report(context.Background(), group)
 	require.NoError(t, err)
-	require.InDelta(t, 12, rep.Allocated7dX, 1e-9)
+	require.InDelta(t, 11, rep.Allocated7dX, 1e-9)
 	require.Equal(t, 2, rep.Unlimited5h)
-	require.InDelta(t, 2.0, rep.Accounts[0].BySubscription7dX[40], 1e-9)
-	require.InDelta(t, 2.0, rep.Accounts[0].Other7dX, 1e-9, "user 4 usage in group 9")
-	require.InDelta(t, 1.0, rep.Accounts[0].Outside7dX, 1e-9)
+	require.InDelta(t, 1.0, rep.Accounts[0].BySubscription7dX[40], 1e-9)
+	require.InDelta(t, 1.0, rep.Accounts[0].Other7dX, 1e-9, "user 4 usage in group 9")
+	require.InDelta(t, 0.5, rep.Accounts[0].Outside7dX, 1e-9)
 
 	// Stale snapshots fail open.
 	e.now = func() time.Time { return now.Add(time.Hour) }

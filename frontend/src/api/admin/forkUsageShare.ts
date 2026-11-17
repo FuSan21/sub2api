@@ -141,9 +141,9 @@ export const tierLabel = (tier: string | null | undefined): string => {
     case 'pro':
       return 'Pro'
     case 'max_5x':
-      return 'Max 5x'
+      return 'Max (5x)'
     case 'max_20x':
-      return 'Max 20x'
+      return 'Ultra (10x)'
     case null:
     case undefined:
       return 'not detected'
