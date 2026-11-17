@@ -8,8 +8,9 @@ package service
 // requests on that account since the previous rise, weighted by API-equivalent
 // cost (usage_logs.total_cost). A rise with no sub2api traffic is "outside" usage.
 //
-// Usage is expressed in x: 1x = one full window of a $20 Claude Pro account. A
-// rise of 10% on a Max 20x account (weight 20) is 2x. A user's usage in a group
+// Usage is expressed in x: 1x = one full window of a $20 Claude Pro account
+// (Max = 5x, Ultra = 10x per claude.com/pricing). A rise of 10% on an Ultra
+// account (weight 10) is 1x. A user's usage in a group
 // is the sum over accounts of their attributed share of each account's *current*
 // window times the account weight, so it follows each account's own reset.
 //
@@ -55,7 +56,7 @@ const (
 	// Normalized account tiers.
 	UsageTierPro    = "pro"
 	UsageTierMax5x  = "max_5x"
-	UsageTierMax20x = "max_20x"
+	UsageTierMax20x = "max_20x" // Anthropic's id for the $200 Ultra plan (10x Pro weekly, no 5h limit)
 
 	usageQuotaMaxX  = 10000
 	usageWeightMaxX = 1000
@@ -168,7 +169,7 @@ func usageTierWeight(tier string) (float64, bool) {
 	case UsageTierMax5x:
 		return 5, true
 	case UsageTierMax20x:
-		return 20, true
+		return 10, true
 	}
 	return 0, false
 }

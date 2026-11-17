@@ -1,7 +1,7 @@
 package service
 
 // [fork] Usage share: detect each Claude OAuth account's plan (Pro / Max 5x /
-// Max 20x) from /api/oauth/profile, so usage can be weighted in Pro-equivalents.
+// Ultra) from /api/oauth/profile, so usage can be weighted in Pro-equivalents.
 // Reuses ClaudeResetCreditService's token, proxy and header handling.
 
 import (
@@ -56,7 +56,7 @@ func normalizeClaudeTier(p claudeProfileTier) string {
 		return UsageTierMax20x
 	case strings.Contains(rate, "max_5x"):
 		return UsageTierMax5x
-	case org == "claude_pro" || (org == "" && p.Account.HasClaudePro && !p.Account.HasClaudeMax):
+	case org == "claude_pro" || rate == "default_claude_ai" || (org == "" && p.Account.HasClaudePro && !p.Account.HasClaudeMax):
 		return UsageTierPro
 	}
 	raw := strings.Trim(org+"/"+rate, "/")

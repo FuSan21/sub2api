@@ -5,7 +5,7 @@
       <div class="rounded-lg bg-gray-50 px-4 py-2.5 text-sm text-gray-600 dark:bg-dark-700 dark:text-gray-400">
         <span class="font-medium text-gray-900 dark:text-white">{{ group.name }}</span>
         — usage is measured in <b>x</b>: <b>1x = one full 5h / weekly window of a $20 Claude Pro account</b>
-        (Max 5x = 5x, Max 20x = 20x). Each rise of an account's utilization is split across the users active on it
+        (Max = 5x, Ultra = 10x, per claude.com/pricing). Each rise of an account's utilization is split across the users active on it
         (by cost) and follows the account's own reset. Quotas belong to subscriptions: copied from the plan on
         purchase, set here per subscription, or the group default below.
       </div>
@@ -251,7 +251,7 @@ const weightInvalid = (id: number) => {
 const autoWeight = (a: UsageShareAccount, w: Win) => {
   const override = w === '5h' ? a.weight_5h_override : a.weight_7d_override
   const used = w === '5h' ? a.weight_5h : a.weight_7d
-  return override === null ? used : ({ pro: 1, max_5x: 5, max_20x: 20 } as Record<string, number>)[a.tier ?? ''] ?? 1
+  return override === null ? used : ({ pro: 1, max_5x: 5, max_20x: 10 } as Record<string, number>)[a.tier ?? ''] ?? 1
 }
 
 const formatTime = (iso: string | null | undefined) =>
