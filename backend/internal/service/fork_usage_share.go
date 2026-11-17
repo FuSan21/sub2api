@@ -336,7 +336,13 @@ type usageAccountView struct {
 	reset  map[string]time.Time
 	weight map[string]float64
 	cap    UsageAccountCapacity
+	// noLimit marks windows the account has no limit in: an Ultra account that
+	// reports no 5-hour window (Ultra has no 5-hour limit for verified accounts).
+	noLimit map[string]bool
 }
+
+// hasNoLimit reports whether the window can never run out on this account.
+func (a *usageAccountView) hasNoLimit(w string) bool { return a.noLimit[w] }
 
 type usageSubView struct {
 	sub   UsageQuotaSubscription
@@ -369,9 +375,22 @@ func (s *usageShareSnapshot) subFor(userID, groupID int64) *usageSubView {
 func (s *usageShareSnapshot) capacity(groupID int64, w string) float64 {
 	var total float64
 	for _, id := range s.groupAccounts[groupID] {
-		total += s.account(id).weight[w]
+		if acc := s.account(id); !acc.hasNoLimit(w) {
+			total += acc.weight[w]
+		}
 	}
 	return total
+}
+
+// noLimitAccounts counts group accounts without a limit in the window.
+func (s *usageShareSnapshot) noLimitAccounts(groupID int64, w string) int {
+	n := 0
+	for _, id := range s.groupAccounts[groupID] {
+		if s.account(id).hasNoLimit(w) {
+			n++
+		}
+	}
+	return n
 }
 
 type usageShareEngine struct {
@@ -564,6 +583,12 @@ func (e *usageShareEngine) buildSnapshot(ctx context.Context) (*usageShareSnapsh
 			ensureAccount(id)
 		}
 	}
+	for _, a := range snap.accounts {
+		_, has5h := a.reset[UsageWindow5h]
+		if !has5h && a.cap.DetectedTier != nil && *a.cap.DetectedTier == UsageTierMax20x {
+			a.noLimit = map[string]bool{UsageWindow5h: true}
+		}
+	}
 
 	for _, sum := range sums {
 		acc, ok := snap.accounts[sum.AccountID]
@@ -645,6 +670,9 @@ func (v *usageSubView) exceeded() []string {
 func (s *usageShareSnapshot) accountHasSpare(accountID int64, windows []string, now time.Time) bool {
 	acc := s.account(accountID)
 	for _, w := range windows {
+		if acc.hasNoLimit(w) {
+			continue // nothing to run out of in this window
+		}
 		reset, ok := acc.reset[w]
 		if !ok {
 			return false
