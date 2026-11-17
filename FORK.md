@@ -79,8 +79,8 @@ upstream body with a bypass marker in the context and post-processes the result
 
 Measures consumption in real Claude account limits instead of dollars, and caps it per subscription.
 
-- **Unit.** Usage is in **x**: 1x = one full 5h (or weekly) window of a $20 Claude Pro account. A Max 5x
-  account is worth 5x, a Max 20x account 20x. Each account's tier is detected from `/api/oauth/profile`
+- **Unit.** Usage is in **x**: 1x = one full 5h (or weekly) window of a $20 Claude Pro account. Per
+  claude.com/pricing a Max ($100) account is worth 5x and an Ultra ($200, plan id `max_20x`) account 10x. Each account's tier is detected from `/api/oauth/profile`
   (`rate_limit_tier`; re-checked daily, oauth accounts with the `user:profile` scope). Admins can override
   an account's 5h/7d size (Groups page → **Usage**); unrecognized tiers count as 1x.
 - **Attribution.** Anthropic reports every account's 5h and 7d utilization on each response (upstream stores
