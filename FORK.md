@@ -77,24 +77,37 @@ upstream body with a bypass marker in the context and post-processes the result
 
 ### `patch/usage-share`
 
-Measures each person's consumption in real account limits instead of dollars, and lets groups cap it.
+Measures consumption in real Claude account limits instead of dollars, and caps it per subscription.
 
-- **Attribution.** Anthropic reports every account's 5h and 7d utilization on each response (upstream
-  stores it in `accounts.extra`). Every 30 s the fork records changes (`fork_usage_samples`) and splits each
-  rise across the users who made requests on that account since the previous rise, weighted by
-  API-equivalent cost (`usage_logs.total_cost`), into `fork_usage_attributions`. A single active user gets the
-  whole rise; a rise with no sub2api traffic is stored as **outside** usage (user NULL). On first start the
-  current windows are backfilled by cost ratio (`estimated = true`).
-- **Consumption** of a user in a group = Σ their share of each group account's *current* window / number of
-  active Anthropic OAuth accounts in the group, i.e. % of the pool. It follows each account's own reset.
-- **Limits** (`fork_usage_share_settings`, `fork_usage_share_limits`): per group default 5h/7d % and per-user
-  overrides. Over a limit, a user may only use accounts that still have ≥ X% left and reset within Y
-  (defaults 40% / 24 h for 7d, 40% / 60 min for 5h) — capacity that would otherwise be wasted. With no such
+- **Unit.** Usage is in **x**: 1x = one full 5h (or weekly) window of a $20 Claude Pro account. A Max 5x
+  account is worth 5x, a Max 20x account 20x. Each account's tier is detected from `/api/oauth/profile`
+  (`rate_limit_tier`; re-checked daily, oauth accounts with the `user:profile` scope). Admins can override
+  an account's 5h/7d size (Groups page → **Usage**); unrecognized tiers count as 1x.
+- **Attribution.** Anthropic reports every account's 5h and 7d utilization on each response (upstream stores
+  it in `accounts.extra`). Every 30 s the fork records changes (`fork_usage_samples`) and splits each rise
+  across the (user, group) pairs that made requests on that account since the previous rise, weighted by
+  API-equivalent cost (`usage_logs.total_cost`), into `fork_usage_attributions`. A rise with no sub2api traffic
+  is **outside** usage. On first start the current windows are backfilled by cost ratio (`estimated = true`).
+- **Usage** of a user in a group = Σ over accounts of their share of the account's *current* window × the
+  account's size, so it follows each account's own reset.
+- **Quotas** (x per 5h/7d window, empty = unlimited) belong to the user's live subscription in the group:
+  `fork_subscription_quotas` (copied from `fork_plan_quotas` when a plan is bought or renewed, or set by an
+  admin), else `fork_group_quota_defaults`, else none. Without a subscription (standard groups) usage is
+  tracked but never limited. Over a quota, a subscription may only use accounts that still have ≥ X% left and
+  reset within Y (global `fork_quota_settings`, defaults 40% / 24 h for 7d, 40% / 60 min for 5h). With no such
   account the request gets `429 USAGE_SHARE_EXCEEDED` and the time usage frees up. Enforcement fails open
   when data is older than 5 minutes.
-- Groups page → **Usage** (also in simple mode), or `GET/PUT /api/v1/admin/groups/:id/usage-share`.
+- **UI.** Groups page → **Usage** (capacity vs. allocated, default quota, per-subscription quotas, account
+  sizes, spare rule); plan dialog → usage quota; Subscriptions and Users pages → quota column; user dashboard
+  → "Claude usage" card.
+- **API.** `GET/PUT /api/v1/admin/groups/:id/usage-share` (report / `{"default": {...}|null}`),
+  `/api/v1/admin/usage-share/{subscriptions[/:id],plans[/:id],accounts/:id,settings}`,
+  `GET /api/v1/user/usage-share`, and `GET /v1/usage-share` (API key; status line) with
+  `used_*_x` / `quota_*_x` / `remaining_*_x`.
 - Hooks: `GatewayService.isAccountSchedulableForModelSelection` (all Anthropic selection paths incl. sticky
-  sessions), the API-key auth middleware (early 429), `ProvideSchedulerSnapshotService` (starts the engine).
+  sessions), the API-key auth middleware (early 429), `ProvideSchedulerSnapshotService` (starts the engine),
+  `ProvideClaudeResetCreditService` (tier detection), `ensurePaymentSubscriptionAssigned` (plan → subscription).
+- `fork_003_usage_quota.sql` replaces the fork_002 per-group %-of-pool tables (their data is dropped).
 
 ### `patch/version-display`
 
