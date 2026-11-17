@@ -52,6 +52,8 @@ export interface UsageShareAccount {
   weight_7d: number
   weight_5h_override: number | null
   weight_7d_override: number | null
+  /** Ultra account without a 5-hour window: excluded from 5h capacity, always spare for 5h. */
+  no_5h_limit: boolean
   util_5h_pct: number | null
   reset_5h: string | null
   util_7d_pct: number | null
@@ -74,6 +76,7 @@ export interface UsageShareReport {
   allocated_7d_x: number
   unlimited_5h: number
   unlimited_7d: number
+  accounts_without_5h_limit: number
   accounts: UsageShareAccount[]
   subscriptions: UsageShareStatus[]
 }

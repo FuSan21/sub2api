@@ -28,6 +28,9 @@
               </span>
               <span class="text-gray-500">allocated</span>
               <span v-if="unlimited(w)" class="text-xs text-gray-400">(+{{ unlimited(w) }} unlimited)</span>
+              <span v-if="w === '5h' && report.accounts_without_5h_limit" class="text-xs text-gray-400">
+                · +{{ report.accounts_without_5h_limit }} account{{ report.accounts_without_5h_limit === 1 ? '' : 's' }} with no 5-hour limit
+              </span>
             </div>
           </div>
           <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
@@ -142,7 +145,8 @@
                   </div>
                 </td>
                 <td class="px-3 py-2">
-                  <AccountWindow :util="a.util_5h_pct" :reset="a.reset_5h" :weight="a.weight_5h" :by-sub="a.by_subscription_5h_x" :other="a.other_5h_x" :outside="a.outside_5h_x" />
+                  <span v-if="a.no_5h_limit" class="text-xs text-gray-500">no 5-hour limit (Ultra)</span>
+                  <AccountWindow v-else :util="a.util_5h_pct" :reset="a.reset_5h" :weight="a.weight_5h" :by-sub="a.by_subscription_5h_x" :other="a.other_5h_x" :outside="a.outside_5h_x" />
                 </td>
                 <td class="px-3 py-2">
                   <AccountWindow :util="a.util_7d_pct" :reset="a.reset_7d" :weight="a.weight_7d" :by-sub="a.by_subscription_7d_x" :other="a.other_7d_x" :outside="a.outside_7d_x" />

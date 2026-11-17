@@ -220,3 +220,65 @@ func TestUsageQuotaEnforcement(t *testing.T) {
 	_, blocked = ForkUsageShareBlocked(group, 4)
 	require.False(t, blocked)
 }
+
+func TestUsageQuotaUltraHasNo5hLimit(t *testing.T) {
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	reset5h := now.Add(4 * time.Hour) // Pro account 5h window resets in 4h: not spare
+	reset7d := now.Add(3 * 24 * time.Hour)
+	id := func(v int64) *int64 { return &v }
+	tier := func(v string) *string { return &v }
+	const group = int64(7)
+
+	store := &usageShareStoreStub{
+		caps: map[int64]UsageAccountCapacity{
+			1: {AccountID: 1, DetectedTier: tier(UsageTierPro)},
+			2: {AccountID: 2, DetectedTier: tier(UsageTierMax20x)}, // Ultra
+		},
+		groups: map[int64][]int64{group: {1, 2}},
+		subs:   []UsageQuotaSubscription{{ID: 40, UserID: 4, GroupID: group, Quota: UsageQuota{Quota5hX: f64(0.5), Quota7dX: f64(5)}}},
+		sums: []UsageAttributionSum{
+			{AccountID: 1, Window: UsageWindow5h, ResetAt: reset5h, UserID: id(4), GroupID: id(group), Delta: 0.6},
+			{AccountID: 2, Window: UsageWindow7d, ResetAt: reset7d, UserID: id(4), GroupID: id(group), Delta: 0.1},
+		},
+	}
+	e := &usageShareEngine{store: store, now: func() time.Time { return now }, names: map[int64]string{}, types: map[int64]string{},
+		last: map[string]*UsageSample{
+			usageSampleKey(1, UsageWindow5h): {AccountID: 1, Window: UsageWindow5h, Utilization: 0.6, ResetAt: reset5h, SampledAt: now},
+			usageSampleKey(1, UsageWindow7d): {AccountID: 1, Window: UsageWindow7d, Utilization: 0.2, ResetAt: reset7d, SampledAt: now},
+			// Ultra reports only the weekly window.
+			usageSampleKey(2, UsageWindow7d): {AccountID: 2, Window: UsageWindow7d, Utilization: 0.3, ResetAt: reset7d, SampledAt: now},
+		}}
+	require.NoError(t, e.rebuildLocked(context.Background()))
+	snap := e.snapshot.Load()
+
+	require.InDelta(t, 1, snap.capacity(group, UsageWindow5h), 1e-9, "Ultra is left out of 5h capacity")
+	require.InDelta(t, 11, snap.capacity(group, UsageWindow7d), 1e-9)
+	require.Equal(t, 1, snap.noLimitAccounts(group, UsageWindow5h))
+
+	sub := snap.subFor(4, group)
+	require.InDelta(t, 0.6, sub.used(UsageWindow5h), 1e-9)
+	require.InDelta(t, 1.0, sub.used(UsageWindow7d), 1e-9, "10% of an Ultra week = 1x")
+	require.Equal(t, []string{UsageWindow5h}, sub.exceeded())
+
+	activeUsageShare.Store(e)
+	t.Cleanup(func() { activeUsageShare.Store(nil) })
+	ctx := context.WithValue(context.Background(), ctxkey.UserID, int64(4))
+	ctx = context.WithValue(ctx, ctxkey.Group, &Group{ID: group})
+	require.False(t, forkUsageShareAllowsAccount(ctx, &Account{ID: 1}), "over the 5h quota, the Pro account is off limits")
+	require.True(t, forkUsageShareAllowsAccount(ctx, &Account{ID: 2}), "the Ultra account has no 5h limit to protect")
+	_, blocked := ForkUsageShareBlocked(group, 4)
+	require.False(t, blocked)
+
+	rep, err := e.report(context.Background(), group)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.NoLimit5h)
+	require.False(t, rep.Accounts[0].No5hLimit)
+	require.True(t, rep.Accounts[1].No5hLimit)
+
+	// An Ultra account that does report a 5h window (unverified) is treated normally.
+	e.last[usageSampleKey(2, UsageWindow5h)] = &UsageSample{AccountID: 2, Window: UsageWindow5h, Utilization: 0.9, ResetAt: reset5h, SampledAt: now}
+	require.NoError(t, e.rebuildLocked(context.Background()))
+	require.False(t, forkUsageShareAllowsAccount(ctx, &Account{ID: 2}))
+	_, blocked = ForkUsageShareBlocked(group, 4)
+	require.True(t, blocked)
+}

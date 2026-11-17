@@ -162,6 +162,9 @@ type UsageShareReportAccount struct {
 	Weight7d    float64    `json:"weight_7d"`
 	Override5h  *float64   `json:"weight_5h_override"`
 	Override7d  *float64   `json:"weight_7d_override"`
+	// No5hLimit: Ultra account without a 5-hour window; not counted in 5h capacity
+	// and always spare for subscriptions over their 5-hour quota.
+	No5hLimit bool `json:"no_5h_limit"`
 	Util5hPct   *float64   `json:"util_5h_pct"`
 	Reset5h     *time.Time `json:"reset_5h"`
 	Util7dPct   *float64   `json:"util_7d_pct"`
@@ -187,6 +190,7 @@ type UsageShareReport struct {
 	Allocated7dX  float64                   `json:"allocated_7d_x"`
 	Unlimited5h   int                       `json:"unlimited_5h"`
 	Unlimited7d   int                       `json:"unlimited_7d"`
+	NoLimit5h     int                       `json:"accounts_without_5h_limit"`
 	Accounts      []UsageShareReportAccount `json:"accounts"`
 	Subscriptions []UsageShareStatus        `json:"subscriptions"`
 }
@@ -215,6 +219,7 @@ func (e *usageShareEngine) report(ctx context.Context, groupID int64) (*UsageSha
 		GroupID: groupID, Default: def, Settings: snap.settings,
 		Capacity5hX: snap.capacity(groupID, UsageWindow5h), Capacity7dX: snap.capacity(groupID, UsageWindow7d),
 		Accounts: []UsageShareReportAccount{}, Subscriptions: []UsageShareStatus{},
+		NoLimit5h: snap.noLimitAccounts(groupID, UsageWindow5h),
 	}
 	subIDByUser := map[int64]int64{}
 	for _, v := range snap.subs {
@@ -243,6 +248,7 @@ func (e *usageShareEngine) report(ctx context.Context, groupID int64) (*UsageSha
 			Tier: acc.cap.DetectedTier, DetectedAt: acc.cap.DetectedAt, DetectError: acc.cap.DetectError,
 			Weight5h: acc.weight[UsageWindow5h], Weight7d: acc.weight[UsageWindow7d],
 			Override5h: acc.cap.Weight5h, Override7d: acc.cap.Weight7d,
+			No5hLimit: acc.hasNoLimit(UsageWindow5h),
 			BySubscription5hX: map[int64]float64{}, BySubscription7dX: map[int64]float64{},
 		}
 		for _, w := range usageWindowKinds {
