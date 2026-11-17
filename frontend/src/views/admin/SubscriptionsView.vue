@@ -375,6 +375,11 @@
             </div>
           </template>
 
+          <!-- [fork] usage share -->
+          <template #cell-fork_usage_quota="{ row }">
+            <ForkSubscriptionQuotaCell :subscription-id="row.id" />
+          </template>
+
           <template #cell-expires_at="{ value }">
             <div v-if="value">
               <span
@@ -849,6 +854,7 @@ import type { SimpleUser } from '@/api/admin/usage'
 import type { SubscriptionBulkAction, SubscriptionBulkActionResult, BulkAssignSubscriptionResult } from '@/api/admin/subscriptions'
 import { useTableSelection } from '@/composables/useTableSelection'
 import BulkSubscriptionActionDialog from '@/components/admin/subscription/BulkSubscriptionActionDialog.vue'
+import ForkSubscriptionQuotaCell from '@/components/admin/subscription/ForkSubscriptionQuotaCell.vue' // [fork]
 import type { Column } from '@/components/common/types'
 import { formatDateTimeToMinute } from '@/utils/format'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
@@ -931,6 +937,7 @@ const allColumns = computed<Column[]>(() => [
   },
   { key: 'group', label: t('admin.subscriptions.columns.group'), sortable: false },
   { key: 'usage', label: t('admin.subscriptions.columns.usage'), sortable: false },
+  { key: 'fork_usage_quota', label: 'Claude quota (x Pro)', sortable: false }, // [fork]
   { key: 'expires_at', label: t('admin.subscriptions.columns.expires'), sortable: true },
   { key: 'status', label: t('admin.subscriptions.columns.status'), sortable: true },
   { key: 'actions', label: t('admin.subscriptions.columns.actions'), sortable: false }

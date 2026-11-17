@@ -38,7 +38,7 @@ func RegisterAdminRoutes(
 
 		// 仪表盘
 		registerDashboardRoutes(admin, h)
-		admin.GET("/usage-share/users", handler.ForkAdminUsageShareUsers) // [fork]
+		handler.ForkRegisterUsageShareAdminRoutes(admin) // [fork]
 
 		// 用户管理
 		registerUserManagementRoutes(admin, h)

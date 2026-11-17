@@ -48,7 +48,7 @@ func TestForkUsageShareRepository(t *testing.T) {
 		{u1.ID, 5, time.Now().Add(-10 * 24 * time.Hour)}, // outside the window
 	} {
 		_, err := client.UsageLog.Create().SetUserID(l.userID).SetAPIKeyID(key.ID).SetAccountID(account.ID).
-			SetRequestID(fmt.Sprintf("share-%d-%d", suffix, i)).SetModel("claude-opus").
+			SetRequestID(fmt.Sprintf("share-%d-%d", suffix, i)).SetModel("claude-opus").SetGroupID(group.ID).
 			SetTotalCost(l.cost).SetCreatedAt(l.at).Save(ctx)
 		require.NoError(t, err)
 	}
@@ -108,37 +108,123 @@ func TestForkUsageShareRepository(t *testing.T) {
 	require.InDelta(t, 0.4, userSum, 1e-9)
 	require.InDelta(t, 0.12, outside, 1e-9)
 
-	settings := service.UsageShareSettings{
-		GroupID: group.ID, Enabled: true, Default7dPct: ptrFloat(20),
-		Spare7dMinPct: 40, Spare7dWithinHours: 24, Spare5hMinPct: 40, Spare5hWithinMinutes: 60,
-		Limits: []service.UsageShareUserLimit{{UserID: u1.ID, Limit7dPct: ptrFloat(50)}, {UserID: u2.ID}},
+	for _, c := range costs {
+		require.NotNil(t, c.GroupID)
+		require.Equal(t, group.ID, *c.GroupID)
 	}
-	require.NoError(t, repo.SaveUsageShareSettings(ctx, settings))
-	settings.Limits = []service.UsageShareUserLimit{{UserID: u2.ID, Limit5hPct: ptrFloat(10)}}
-	require.NoError(t, repo.SaveUsageShareSettings(ctx, settings)) // replaces u1's override
-	all, err := repo.ListUsageShareSettings(ctx)
+	gid := group.ID
+	require.NoError(t, repo.RecordUsageSegment(ctx, service.UsageSample{AccountID: account.ID, Window: service.UsageWindow5h,
+		Utilization: 0.25, ResetAt: reset5h, SampledAt: sampled}, sampled.Add(-time.Hour),
+		[]service.UsageAttribution{{UserID: &uid, GroupID: &gid, Delta: 0.25}}, false))
+	sums, err = repo.ListCurrentUsageAttributions(ctx, time.Now())
 	require.NoError(t, err)
-	var got *service.UsageShareSettings
-	for i := range all {
-		if all[i].GroupID == group.ID {
-			got = &all[i]
+	var grouped float64
+	for _, s := range sums {
+		if s.AccountID == account.ID && s.GroupID != nil && *s.GroupID == group.ID {
+			grouped += s.Delta
 		}
 	}
-	require.NotNil(t, got)
-	require.True(t, got.Enabled)
-	require.InDelta(t, 20, *got.Default7dPct, 1e-9)
-	require.Nil(t, got.Default5hPct)
-	require.Len(t, got.Limits, 1)
-	require.Equal(t, u2.ID, got.Limits[0].UserID)
-	require.InDelta(t, 10, *got.Limits[0].Limit5hPct, 1e-9)
+	require.InDelta(t, 0.25, grouped, 1e-9)
 
-	groupAccounts, err := repo.ListUsageShareGroupAccounts(ctx, []int64{group.ID})
+	// Global settings: seeded by the migration, then replaced.
+	settings, err := repo.GetUsageQuotaSettings(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 24, settings.Spare7dWithinHours)
+	settings.Spare5hMinPct = 30
+	require.NoError(t, repo.SaveUsageQuotaSettings(ctx, settings))
+	settings, err = repo.GetUsageQuotaSettings(ctx)
+	require.NoError(t, err)
+	require.InDelta(t, 30, settings.Spare5hMinPct, 1e-9)
+
+	// Account capacity: detected tier, admin override, re-detect.
+	tier := service.UsageTierMax5x
+	require.NoError(t, repo.SaveDetectedTier(ctx, account.ID, &tier, nil, time.Now()))
+	require.NoError(t, repo.SaveAccountWeights(ctx, account.ID, nil, ptrFloat(4), false))
+	caps, err := repo.ListAccountCapacities(ctx)
+	require.NoError(t, err)
+	c := caps[account.ID]
+	require.Equal(t, service.UsageTierMax5x, *c.DetectedTier)
+	require.NotNil(t, c.DetectedAt)
+	require.Nil(t, c.Weight5h)
+	require.InDelta(t, 4, *c.Weight7d, 1e-9)
+	require.NoError(t, repo.SaveAccountWeights(ctx, account.ID, nil, nil, true))
+	caps, err = repo.ListAccountCapacities(ctx)
+	require.NoError(t, err)
+	require.Nil(t, caps[account.ID].DetectedAt, "re-detect clears the detection time")
+	require.Equal(t, service.UsageTierMax5x, *caps[account.ID].DetectedTier, "keeps the tier until re-detected")
+	require.ErrorIs(t, repo.SaveAccountWeights(ctx, -1, nil, nil, false), service.ErrUsageQuotaTargetNotFound)
+
+	groupAccounts, err := repo.ListUsageShareGroupAccounts(ctx)
 	require.NoError(t, err)
 	require.Equal(t, []int64{account.ID}, groupAccounts[group.ID])
 
-	users, err := repo.ListUsageShareUsers(ctx, group.ID, []int64{u2.ID})
+	// Quotas: none -> group default -> subscription row -> cleared back to default.
+	sub := mustCreateSubscription(t, client, &service.UserSubscription{UserID: u1.ID, GroupID: group.ID})
+	quotaOf := func() service.UsageQuotaSubscription {
+		subs, err := repo.ListQuotaSubscriptions(ctx)
+		require.NoError(t, err)
+		for _, s := range subs {
+			if s.ID == sub.ID {
+				return s
+			}
+		}
+		t.Fatalf("subscription %d not listed", sub.ID)
+		return service.UsageQuotaSubscription{}
+	}
+	got := quotaOf()
+	require.Equal(t, service.UsageQuotaSourceNone, got.Source)
+	require.Nil(t, got.Quota.Quota7dX)
+	require.Equal(t, u1.Email, got.Email)
+	require.Equal(t, group.Name, got.GroupName)
+
+	require.NoError(t, repo.SaveGroupQuotaDefault(ctx, group.ID, &service.UsageQuota{Quota7dX: ptrFloat(0.5)}))
+	def, err := repo.GetGroupQuotaDefault(ctx, group.ID)
 	require.NoError(t, err)
-	require.Len(t, users, 2) // u1 via api key, u2 via extra ids
+	require.InDelta(t, 0.5, *def.Quota7dX, 1e-9)
+	got = quotaOf()
+	require.Equal(t, service.UsageQuotaSourceGroup, got.Source)
+	require.InDelta(t, 0.5, *got.Quota.Quota7dX, 1e-9)
+
+	require.NoError(t, repo.SaveSubscriptionQuota(ctx, sub.ID, &service.UsageQuota{Quota5hX: ptrFloat(2)}))
+	got = quotaOf()
+	require.Equal(t, service.UsageQuotaSourceAdmin, got.Source)
+	require.InDelta(t, 2, *got.Quota.Quota5hX, 1e-9)
+	require.Nil(t, got.Quota.Quota7dX, "the row replaces the default in both windows")
+	require.ErrorIs(t, repo.SaveSubscriptionQuota(ctx, -1, &service.UsageQuota{}), service.ErrUsageQuotaTargetNotFound)
+
+	// Plan quota copied on purchase; an older order never overwrites a newer one.
+	plan, err := client.SubscriptionPlan.Create().SetGroupID(group.ID).SetName(fmt.Sprintf("plan-%d", suffix)).SetPrice(20).Save(ctx)
+	require.NoError(t, err)
+	applied, err := repo.ApplyPlanQuota(ctx, plan.ID, 100, u1.ID, group.ID)
+	require.NoError(t, err)
+	require.False(t, applied, "plan without a quota changes nothing")
+	require.NoError(t, repo.SavePlanQuota(ctx, plan.ID, &service.UsageQuota{Quota5hX: ptrFloat(1), Quota7dX: ptrFloat(1)}))
+	plans, err := repo.ListPlanQuotas(ctx)
+	require.NoError(t, err)
+	require.InDelta(t, 1, *plans[plan.ID].Quota7dX, 1e-9)
+	applied, err = repo.ApplyPlanQuota(ctx, plan.ID, 100, u1.ID, group.ID)
+	require.NoError(t, err)
+	require.True(t, applied)
+	got = quotaOf()
+	require.Equal(t, service.UsageQuotaSourcePlan, got.Source)
+	require.Equal(t, plan.ID, *got.PlanID)
+	require.InDelta(t, 1, *got.Quota.Quota7dX, 1e-9)
+	applied, err = repo.ApplyPlanQuota(ctx, plan.ID, 99, u1.ID, group.ID)
+	require.NoError(t, err)
+	require.False(t, applied, "older order")
+	require.NoError(t, repo.SaveSubscriptionQuota(ctx, sub.ID, &service.UsageQuota{Quota7dX: ptrFloat(3)}))
+	applied, err = repo.ApplyPlanQuota(ctx, plan.ID, 100, u1.ID, group.ID)
+	require.NoError(t, err)
+	require.False(t, applied, "a retried order keeps the admin edit")
+	applied, err = repo.ApplyPlanQuota(ctx, plan.ID, 101, u1.ID, group.ID)
+	require.NoError(t, err)
+	require.True(t, applied, "a newer purchase wins")
+
+	require.NoError(t, repo.SaveSubscriptionQuota(ctx, sub.ID, nil))
+	require.Equal(t, service.UsageQuotaSourceGroup, quotaOf().Source)
+	require.NoError(t, repo.SavePlanQuota(ctx, plan.ID, nil))
+	require.NoError(t, repo.SaveGroupQuotaDefault(ctx, group.ID, nil))
+	require.Equal(t, service.UsageQuotaSourceNone, quotaOf().Source)
 
 	require.NoError(t, repo.PruneUsageShare(ctx, time.Now().Add(-9*24*time.Hour)))
 }

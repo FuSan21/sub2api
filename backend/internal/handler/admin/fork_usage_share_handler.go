@@ -1,6 +1,6 @@
 package admin
 
-// [fork] Usage share settings and report. Available in simple mode too.
+// [fork] Usage share: group default quota and report. Available in simple mode too.
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 
 type usageShareAdmin interface {
 	GetUsageShare(ctx context.Context, groupID int64) (*service.UsageShareReport, error)
-	SetUsageShare(ctx context.Context, groupID int64, input service.UsageShareSettings) (*service.UsageShareReport, error)
+	SetUsageShare(ctx context.Context, groupID int64, input service.UsageShareGroupInput) (*service.UsageShareReport, error)
 }
 
 func (h *GroupHandler) usageShareAdmin(c *gin.Context) (usageShareAdmin, int64, bool) {
@@ -31,8 +31,8 @@ func (h *GroupHandler) usageShareAdmin(c *gin.Context) (usageShareAdmin, int64, 
 	return svc, groupID, true
 }
 
-// GetUsageShare returns the group's usage share settings and each user's
-// consumption of the account pool.
+// GetUsageShare returns the group's default quota, pool capacity, accounts and
+// each subscription's usage in Pro-equivalents.
 // GET /api/v1/admin/groups/:id/usage-share
 func (h *GroupHandler) GetUsageShare(c *gin.Context) {
 	svc, groupID, ok := h.usageShareAdmin(c)
@@ -47,14 +47,14 @@ func (h *GroupHandler) GetUsageShare(c *gin.Context) {
 	response.Success(c, report)
 }
 
-// SetUsageShare replaces the group's usage share settings and per-user limits.
-// PUT /api/v1/admin/groups/:id/usage-share
+// SetUsageShare replaces the group's default subscription quota.
+// PUT /api/v1/admin/groups/:id/usage-share {"default": {"quota_5h_x": 1, "quota_7d_x": null} | null}
 func (h *GroupHandler) SetUsageShare(c *gin.Context) {
 	svc, groupID, ok := h.usageShareAdmin(c)
 	if !ok {
 		return
 	}
-	var req service.UsageShareSettings
+	var req service.UsageShareGroupInput
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return

@@ -1,18 +1,23 @@
 package service
 
-// [fork] Usage share.
+// [fork] Usage share: per-subscription quotas measured in Pro-account equivalents.
 //
 // Anthropic reports each account's 5h and 7d utilization on every response
 // (stored by upstream in accounts.extra). Every 30s the engine records changes
-// and splits each utilization rise across the users who made requests on that
-// account since the previous rise, weighted by API-equivalent cost
-// (usage_logs.total_cost). A rise with no sub2api traffic is "outside" usage.
+// and splits each utilization rise across the (user, group) pairs that made
+// requests on that account since the previous rise, weighted by API-equivalent
+// cost (usage_logs.total_cost). A rise with no sub2api traffic is "outside" usage.
 //
-// A user's consumption in a group is the sum of their attributed share of each
-// group account's *current* window, as a % of the group pool
-// (100% = every account in the group fully used). Groups can set per-user limits
-// for 5h and 7d; a user over a limit may only use accounts that still have spare
-// capacity shortly before they reset, otherwise requests get a 429.
+// Usage is expressed in x: 1x = one full window of a $20 Claude Pro account. A
+// rise of 10% on a Max 20x account (weight 20) is 2x. A user's usage in a group
+// is the sum over accounts of their attributed share of each account's *current*
+// window times the account weight, so it follows each account's own reset.
+//
+// Quotas (in x, per window) belong to the user's live subscription in the group:
+// a per-subscription row (copied from the plan on purchase, or set by an admin)
+// or else the group default. Without a subscription nothing is limited. Over a
+// quota, a subscription may only use accounts that still have spare capacity
+// shortly before they reset; with none, requests get a 429.
 
 import (
 	"context"
@@ -40,6 +45,20 @@ const (
 	usageShareRetention      = 9 * 24 * time.Hour
 	usageShareResetTolerance = time.Hour
 	usageShareEpsilon        = 1e-9
+
+	// Quota sources reported to the UI.
+	UsageQuotaSourcePlan  = "plan"
+	UsageQuotaSourceAdmin = "admin"
+	UsageQuotaSourceGroup = "group"
+	UsageQuotaSourceNone  = "none"
+
+	// Normalized account tiers.
+	UsageTierPro    = "pro"
+	UsageTierMax5x  = "max_5x"
+	UsageTierMax20x = "max_20x"
+
+	usageQuotaMaxX  = 10000
+	usageWeightMaxX = 1000
 )
 
 var usageWindowKinds = []string{UsageWindow5h, UsageWindow7d}
@@ -55,6 +74,7 @@ func usageWindowLength(kind string) time.Duration {
 type UsageShareAccountState struct {
 	ID        int64
 	Name      string
+	Type      string
 	Status    string
 	Util      map[string]*float64
 	Reset     map[string]*time.Time
@@ -70,89 +90,119 @@ type UsageSample struct {
 	SampledAt   time.Time
 }
 
-// UsageUserCost is one user's request cost on an account in a segment.
+// UsageUserCost is one (user, group) pair's request cost on an account in a segment.
 type UsageUserCost struct {
 	UserID   int64
+	GroupID  *int64
 	Cost     float64
 	Requests int64
 }
 
-// UsageAttribution assigns part of a utilization rise to a user (nil = outside sub2api).
+// UsageAttribution assigns part of a utilization rise to a user in a group
+// (UserID nil = outside sub2api).
 type UsageAttribution struct {
-	UserID *int64
-	Delta  float64
+	UserID  *int64
+	GroupID *int64
+	Delta   float64
 }
 
-// UsageAttributionSum is the attributed total for one user in one account window.
+// UsageAttributionSum is the attributed total for one (user, group) in one account window.
 type UsageAttributionSum struct {
 	AccountID int64
 	Window    string
 	ResetAt   time.Time
 	UserID    *int64
+	GroupID   *int64
 	Delta     float64
 }
 
-// UsageShareUserLimit overrides the group defaults for one user (nil = default).
-type UsageShareUserLimit struct {
-	UserID     int64    `json:"user_id"`
-	Limit7dPct *float64 `json:"limit_7d_pct"`
-	Limit5hPct *float64 `json:"limit_5h_pct"`
+// UsageQuota is a per-window quota in x (nil = unlimited).
+type UsageQuota struct {
+	Quota5hX *float64 `json:"quota_5h_x"`
+	Quota7dX *float64 `json:"quota_7d_x"`
 }
 
-// UsageShareSettings configures usage share for a group.
-type UsageShareSettings struct {
-	GroupID              int64                 `json:"group_id"`
-	Enabled              bool                  `json:"enabled"`
-	Default7dPct         *float64              `json:"default_7d_pct"`
-	Default5hPct         *float64              `json:"default_5h_pct"`
-	Spare7dMinPct        float64               `json:"spare_7d_min_pct"`
-	Spare7dWithinHours   int                   `json:"spare_7d_within_hours"`
-	Spare5hMinPct        float64               `json:"spare_5h_min_pct"`
-	Spare5hWithinMinutes int                   `json:"spare_5h_within_minutes"`
-	Limits               []UsageShareUserLimit `json:"limits"`
-}
-
-func defaultUsageShareSettings(groupID int64) UsageShareSettings {
-	return UsageShareSettings{
-		GroupID:              groupID,
-		Spare7dMinPct:        40,
-		Spare7dWithinHours:   24,
-		Spare5hMinPct:        40,
-		Spare5hWithinMinutes: 60,
+func (q UsageQuota) forWindow(w string) *float64 {
+	if w == UsageWindow5h {
+		return q.Quota5hX
 	}
+	return q.Quota7dX
 }
 
-func (s UsageShareSettings) limitFor(userID int64, window string) *float64 {
-	for _, l := range s.Limits {
-		if l.UserID != userID {
-			continue
-		}
-		if window == UsageWindow5h && l.Limit5hPct != nil {
-			return l.Limit5hPct
-		}
-		if window == UsageWindow7d && l.Limit7dPct != nil {
-			return l.Limit7dPct
-		}
-		break
-	}
-	if window == UsageWindow5h {
-		return s.Default5hPct
-	}
-	return s.Default7dPct
+func (q UsageQuota) limited() bool { return q.Quota5hX != nil || q.Quota7dX != nil }
+
+// UsageQuotaSettings is the global spare-capacity rule.
+type UsageQuotaSettings struct {
+	Spare7dMinPct        float64 `json:"spare_7d_min_pct"`
+	Spare7dWithinHours   int     `json:"spare_7d_within_hours"`
+	Spare5hMinPct        float64 `json:"spare_5h_min_pct"`
+	Spare5hWithinMinutes int     `json:"spare_5h_within_minutes"`
 }
 
-func (s UsageShareSettings) spareRule(window string) (minRemainingPct float64, within time.Duration) {
+func defaultUsageQuotaSettings() UsageQuotaSettings {
+	return UsageQuotaSettings{Spare7dMinPct: 40, Spare7dWithinHours: 24, Spare5hMinPct: 40, Spare5hWithinMinutes: 60}
+}
+
+func (s UsageQuotaSettings) spareRule(window string) (minRemainingPct float64, within time.Duration) {
 	if window == UsageWindow5h {
 		return s.Spare5hMinPct, time.Duration(s.Spare5hWithinMinutes) * time.Minute
 	}
 	return s.Spare7dMinPct, time.Duration(s.Spare7dWithinHours) * time.Hour
 }
 
-// UsageShareUser identifies a user in reports.
-type UsageShareUser struct {
-	ID       int64  `json:"id"`
-	Email    string `json:"email"`
-	Username string `json:"username"`
+// UsageAccountCapacity is an account's detected tier and admin weight overrides.
+type UsageAccountCapacity struct {
+	AccountID    int64      `json:"account_id"`
+	DetectedTier *string    `json:"detected_tier"`
+	DetectedAt   *time.Time `json:"detected_at"`
+	DetectError  *string    `json:"detect_error"`
+	Weight5h     *float64   `json:"weight_5h_override"`
+	Weight7d     *float64   `json:"weight_7d_override"`
+}
+
+// usageTierWeight maps a normalized tier to its size in Pro-equivalents.
+func usageTierWeight(tier string) (float64, bool) {
+	switch tier {
+	case UsageTierPro:
+		return 1, true
+	case UsageTierMax5x:
+		return 5, true
+	case UsageTierMax20x:
+		return 20, true
+	}
+	return 0, false
+}
+
+// weight is the account's effective size in x for the window: the admin override,
+// else the detected tier's preset, else 1.
+func (c UsageAccountCapacity) weight(w string) float64 {
+	override := c.Weight7d
+	if w == UsageWindow5h {
+		override = c.Weight5h
+	}
+	if override != nil && *override > 0 {
+		return *override
+	}
+	if c.DetectedTier != nil {
+		if v, ok := usageTierWeight(*c.DetectedTier); ok {
+			return v
+		}
+	}
+	return 1
+}
+
+// UsageQuotaSubscription is a live subscription with its effective quota.
+type UsageQuotaSubscription struct {
+	ID        int64
+	UserID    int64
+	GroupID   int64
+	GroupName string
+	Email     string
+	Username  string
+	ExpiresAt time.Time
+	Quota     UsageQuota
+	Source    string // plan / admin / group / none
+	PlanID    *int64
 }
 
 // UsageShareStore is implemented by the account repository.
@@ -162,15 +212,25 @@ type UsageShareStore interface {
 	UsageCostByUser(ctx context.Context, accountID int64, from, to time.Time) ([]UsageUserCost, error)
 	RecordUsageSegment(ctx context.Context, sample UsageSample, segmentStart time.Time, attributions []UsageAttribution, estimated bool) error
 	ListCurrentUsageAttributions(ctx context.Context, now time.Time) ([]UsageAttributionSum, error)
-	ListUsageShareSettings(ctx context.Context) ([]UsageShareSettings, error)
-	SaveUsageShareSettings(ctx context.Context, settings UsageShareSettings) error
-	ListUsageShareGroupAccounts(ctx context.Context, groupIDs []int64) (map[int64][]int64, error)
-	ListUsageShareUsers(ctx context.Context, groupID int64, extraUserIDs []int64) ([]UsageShareUser, error)
 	PruneUsageShare(ctx context.Context, before time.Time) error
+
+	GetUsageQuotaSettings(ctx context.Context) (UsageQuotaSettings, error)
+	SaveUsageQuotaSettings(ctx context.Context, s UsageQuotaSettings) error
+	ListAccountCapacities(ctx context.Context) (map[int64]UsageAccountCapacity, error)
+	SaveAccountWeights(ctx context.Context, accountID int64, weight5h, weight7d *float64, redetect bool) error
+	SaveDetectedTier(ctx context.Context, accountID int64, tier, detectErr *string, at time.Time) error
+	ListUsageShareGroupAccounts(ctx context.Context) (map[int64][]int64, error)
+	ListQuotaSubscriptions(ctx context.Context) ([]UsageQuotaSubscription, error)
+	GetGroupQuotaDefault(ctx context.Context, groupID int64) (*UsageQuota, error)
+	SaveGroupQuotaDefault(ctx context.Context, groupID int64, q *UsageQuota) error
+	SaveSubscriptionQuota(ctx context.Context, subscriptionID int64, q *UsageQuota) error
+	ListPlanQuotas(ctx context.Context) (map[int64]UsageQuota, error)
+	SavePlanQuota(ctx context.Context, planID int64, q *UsageQuota) error
+	ApplyPlanQuota(ctx context.Context, planID, orderID, userID, groupID int64) (bool, error)
 }
 
-// splitUsageDelta divides a utilization rise across users by cost, falling back
-// to request count when all costs are zero, or to outside usage when idle.
+// splitUsageDelta divides a utilization rise across (user, group) pairs by cost,
+// falling back to request count when all costs are zero, or to outside usage when idle.
 func splitUsageDelta(delta float64, costs []UsageUserCost) []UsageAttribution {
 	if delta <= usageShareEpsilon {
 		return nil
@@ -196,7 +256,12 @@ func splitUsageDelta(delta float64, costs []UsageUserCost) []UsageAttribution {
 			continue
 		}
 		userID := c.UserID
-		out = append(out, UsageAttribution{UserID: &userID, Delta: delta * weight})
+		var groupID *int64
+		if c.GroupID != nil {
+			g := *c.GroupID
+			groupID = &g
+		}
+		out = append(out, UsageAttribution{UserID: &userID, GroupID: groupID, Delta: delta * weight})
 	}
 	if len(out) == 0 {
 		out = append(out, UsageAttribution{Delta: delta})
@@ -245,33 +310,67 @@ func planUsageSegment(last *UsageSample, window string, util float64, resetAt, s
 	}
 }
 
-type usageContribution struct {
-	resetAt time.Time
-	pct     float64
+// --- snapshot ----------------------------------------------------------------
+
+// usageKey identifies who used capacity; user 0 = outside sub2api, group 0 = no group.
+type usageKey struct {
+	userID  int64
+	groupID int64
 }
 
-type usageShareUserView struct {
-	pct     map[string]float64
+type usageContribution struct {
+	resetAt time.Time
+	x       float64
+}
+
+// usageView is one (user, group)'s current usage in x.
+type usageView struct {
+	used    map[string]float64
 	contrib map[string][]usageContribution
 }
 
-type usageShareGroupView struct {
-	settings   UsageShareSettings
-	accountIDs []int64
-	users      map[int64]*usageShareUserView
-	// per account, per window: user -> attributed fraction; key 0 = outside
-	perAccount map[int64]map[string]map[int64]float64
+type usageAccountView struct {
+	name   string
+	util   map[string]float64
+	reset  map[string]time.Time
+	weight map[string]float64
+	cap    UsageAccountCapacity
 }
 
-type usageShareAccountView struct {
-	util  map[string]float64
-	reset map[string]time.Time
+type usageSubView struct {
+	sub   UsageQuotaSubscription
+	usage *usageView
 }
 
 type usageShareSnapshot struct {
-	at       time.Time
-	groups   map[int64]*usageShareGroupView
-	accounts map[int64]usageShareAccountView
+	at            time.Time
+	settings      UsageQuotaSettings
+	accounts      map[int64]*usageAccountView
+	groupAccounts map[int64][]int64
+	usage         map[usageKey]*usageView
+	subs          map[int64]*usageSubView
+	byUserGroup   map[usageKey]*usageSubView
+	// account -> window -> (user, group) -> attributed fraction of the window
+	current map[int64]map[string]map[usageKey]float64
+}
+
+func (s *usageShareSnapshot) account(id int64) *usageAccountView {
+	if a := s.accounts[id]; a != nil {
+		return a
+	}
+	return &usageAccountView{util: map[string]float64{}, reset: map[string]time.Time{}, weight: map[string]float64{UsageWindow5h: 1, UsageWindow7d: 1}}
+}
+
+func (s *usageShareSnapshot) subFor(userID, groupID int64) *usageSubView {
+	return s.byUserGroup[usageKey{userID: userID, groupID: groupID}]
+}
+
+func (s *usageShareSnapshot) capacity(groupID int64, w string) float64 {
+	var total float64
+	for _, id := range s.groupAccounts[groupID] {
+		total += s.account(id).weight[w]
+	}
+	return total
 }
 
 type usageShareEngine struct {
@@ -281,8 +380,10 @@ type usageShareEngine struct {
 	last      map[string]*UsageSample
 	loaded    bool
 	names     map[int64]string
+	types     map[int64]string
 	lastPrune time.Time
 	snapshot  atomic.Pointer[usageShareSnapshot]
+	detecting atomic.Bool
 }
 
 var activeUsageShare atomic.Pointer[usageShareEngine]
@@ -297,7 +398,7 @@ func StartForkUsageShare(repo AccountRepository, cfg *config.Config) {
 	if !ok {
 		return
 	}
-	engine := &usageShareEngine{store: store, now: time.Now, last: map[string]*UsageSample{}, names: map[int64]string{}}
+	engine := &usageShareEngine{store: store, now: time.Now, last: map[string]*UsageSample{}, names: map[int64]string{}, types: map[int64]string{}}
 	if !activeUsageShare.CompareAndSwap(nil, engine) {
 		return
 	}
@@ -314,6 +415,7 @@ func (e *usageShareEngine) run() {
 			slog.Warn("fork_usage_share_tick_failed", "error", err)
 		}
 		cancel()
+		e.startTierDetection()
 		<-ticker.C
 	}
 }
@@ -352,6 +454,7 @@ func (e *usageShareEngine) ingest(ctx context.Context) error {
 	now := e.now()
 	for _, st := range states {
 		e.names[st.ID] = st.Name
+		e.types[st.ID] = st.Type
 		sampledAt := now
 		if st.SampledAt != nil && !st.SampledAt.After(now) {
 			sampledAt = *st.SampledAt
@@ -389,17 +492,7 @@ func (e *usageShareEngine) ingest(ctx context.Context) error {
 }
 
 func (e *usageShareEngine) rebuildLocked(ctx context.Context) error {
-	settings, err := e.store.ListUsageShareSettings(ctx)
-	if err != nil {
-		return err
-	}
-	enabled := make([]UsageShareSettings, 0, len(settings))
-	for _, s := range settings {
-		if s.Enabled {
-			enabled = append(enabled, s)
-		}
-	}
-	snap, err := e.buildSnapshot(ctx, enabled)
+	snap, err := e.buildSnapshot(ctx)
 	if err != nil {
 		return err
 	}
@@ -407,28 +500,28 @@ func (e *usageShareEngine) rebuildLocked(ctx context.Context) error {
 	return nil
 }
 
-func (e *usageShareEngine) buildSnapshot(ctx context.Context, settings []UsageShareSettings) (*usageShareSnapshot, error) {
+// rebuild refreshes the snapshot after an admin change.
+func (e *usageShareEngine) rebuild(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.rebuildLocked(ctx)
+}
+
+func (e *usageShareEngine) buildSnapshot(ctx context.Context) (*usageShareSnapshot, error) {
 	now := e.now()
-	snap := &usageShareSnapshot{at: now, groups: map[int64]*usageShareGroupView{}, accounts: map[int64]usageShareAccountView{}}
-	for _, s := range e.last {
-		view, ok := snap.accounts[s.AccountID]
-		if !ok {
-			view = usageShareAccountView{util: map[string]float64{}, reset: map[string]time.Time{}}
-			snap.accounts[s.AccountID] = view
-		}
-		if s.ResetAt.After(now) {
-			view.util[s.Window] = s.Utilization
-			view.reset[s.Window] = s.ResetAt
-		}
+	settings, err := e.store.GetUsageQuotaSettings(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if len(settings) == 0 {
-		return snap, nil
+	caps, err := e.store.ListAccountCapacities(ctx)
+	if err != nil {
+		return nil, err
 	}
-	groupIDs := make([]int64, 0, len(settings))
-	for _, s := range settings {
-		groupIDs = append(groupIDs, s.GroupID)
+	groupAccounts, err := e.store.ListUsageShareGroupAccounts(ctx)
+	if err != nil {
+		return nil, err
 	}
-	groupAccounts, err := e.store.ListUsageShareGroupAccounts(ctx, groupIDs)
+	subs, err := e.store.ListQuotaSubscriptions(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -436,8 +529,41 @@ func (e *usageShareEngine) buildSnapshot(ctx context.Context, settings []UsageSh
 	if err != nil {
 		return nil, err
 	}
-	// account -> window -> user (0 = outside) -> fraction, current windows only
-	current := map[int64]map[string]map[int64]float64{}
+
+	snap := &usageShareSnapshot{
+		at:            now,
+		settings:      settings,
+		accounts:      map[int64]*usageAccountView{},
+		groupAccounts: groupAccounts,
+		usage:         map[usageKey]*usageView{},
+		subs:          map[int64]*usageSubView{},
+		byUserGroup:   map[usageKey]*usageSubView{},
+		current:       map[int64]map[string]map[usageKey]float64{},
+	}
+	ensureAccount := func(id int64) *usageAccountView {
+		if a := snap.accounts[id]; a != nil {
+			return a
+		}
+		c := caps[id]
+		c.AccountID = id
+		a := &usageAccountView{name: e.names[id], util: map[string]float64{}, reset: map[string]time.Time{}, cap: c,
+			weight: map[string]float64{UsageWindow5h: c.weight(UsageWindow5h), UsageWindow7d: c.weight(UsageWindow7d)}}
+		snap.accounts[id] = a
+		return a
+	}
+	for _, s := range e.last {
+		a := ensureAccount(s.AccountID)
+		if s.ResetAt.After(now) {
+			a.util[s.Window] = s.Utilization
+			a.reset[s.Window] = s.ResetAt
+		}
+	}
+	for _, ids := range groupAccounts {
+		for _, id := range ids {
+			ensureAccount(id)
+		}
+	}
+
 	for _, sum := range sums {
 		acc, ok := snap.accounts[sum.AccountID]
 		if !ok {
@@ -445,48 +571,47 @@ func (e *usageShareEngine) buildSnapshot(ctx context.Context, settings []UsageSh
 		}
 		reset, ok := acc.reset[sum.Window]
 		if !ok || !reset.Equal(sum.ResetAt) {
-			continue
+			continue // attribution of a finished window
 		}
-		if current[sum.AccountID] == nil {
-			current[sum.AccountID] = map[string]map[int64]float64{}
-		}
-		if current[sum.AccountID][sum.Window] == nil {
-			current[sum.AccountID][sum.Window] = map[int64]float64{}
-		}
-		var uid int64
+		var key usageKey
 		if sum.UserID != nil {
-			uid = *sum.UserID
-		}
-		current[sum.AccountID][sum.Window][uid] += sum.Delta
-	}
-	for _, s := range settings {
-		g := &usageShareGroupView{settings: s, accountIDs: groupAccounts[s.GroupID], users: map[int64]*usageShareUserView{}, perAccount: map[int64]map[string]map[int64]float64{}}
-		n := float64(len(g.accountIDs))
-		for _, accID := range g.accountIDs {
-			g.perAccount[accID] = current[accID]
-			for w, byUser := range current[accID] {
-				reset := snap.accounts[accID].reset[w]
-				for uid, frac := range byUser {
-					if uid == 0 {
-						continue
-					}
-					u := g.users[uid]
-					if u == nil {
-						u = &usageShareUserView{pct: map[string]float64{}, contrib: map[string][]usageContribution{}}
-						g.users[uid] = u
-					}
-					pct := 100 * frac / n
-					u.pct[w] += pct
-					u.contrib[w] = append(u.contrib[w], usageContribution{resetAt: reset, pct: pct})
-				}
+			key.userID = *sum.UserID
+			if sum.GroupID != nil {
+				key.groupID = *sum.GroupID
 			}
 		}
-		snap.groups[s.GroupID] = g
+		byWindow := snap.current[sum.AccountID]
+		if byWindow == nil {
+			byWindow = map[string]map[usageKey]float64{}
+			snap.current[sum.AccountID] = byWindow
+		}
+		if byWindow[sum.Window] == nil {
+			byWindow[sum.Window] = map[usageKey]float64{}
+		}
+		byWindow[sum.Window][key] += sum.Delta
+		if key.userID == 0 {
+			continue
+		}
+		u := snap.usage[key]
+		if u == nil {
+			u = &usageView{used: map[string]float64{}, contrib: map[string][]usageContribution{}}
+			snap.usage[key] = u
+		}
+		x := sum.Delta * acc.weight[sum.Window]
+		u.used[sum.Window] += x
+		u.contrib[sum.Window] = append(u.contrib[sum.Window], usageContribution{resetAt: reset, x: x})
+	}
+
+	for _, s := range subs {
+		key := usageKey{userID: s.UserID, groupID: s.GroupID}
+		v := &usageSubView{sub: s, usage: snap.usage[key]}
+		snap.subs[s.ID] = v
+		snap.byUserGroup[key] = v
 	}
 	return snap, nil
 }
 
-// --- enforcement -----------------------------------------------------------
+// --- enforcement -------------------------------------------------------------
 
 func (e *usageShareEngine) fresh() *usageShareSnapshot {
 	snap := e.snapshot.Load()
@@ -496,40 +621,48 @@ func (e *usageShareEngine) fresh() *usageShareSnapshot {
 	return snap
 }
 
-// exceeded returns the windows in which the user is at or over their limit.
-func (g *usageShareGroupView) exceeded(userID int64) []string {
+func (v *usageSubView) used(w string) float64 {
+	if v.usage == nil {
+		return 0
+	}
+	return v.usage.used[w]
+}
+
+// exceeded returns the windows in which the subscription is at or over its quota.
+func (v *usageSubView) exceeded() []string {
 	var out []string
-	u := g.users[userID]
 	for _, w := range usageWindowKinds {
-		limit := g.settings.limitFor(userID, w)
-		if limit == nil {
-			continue
-		}
-		var used float64
-		if u != nil {
-			used = u.pct[w]
-		}
-		if used >= *limit {
+		if q := v.sub.Quota.forWindow(w); q != nil && v.used(w) >= *q {
 			out = append(out, w)
 		}
 	}
 	return out
 }
 
-// accountHasSpare reports whether an over-limit user may still use the account
-// because it has unused capacity that resets soon in every exceeded window.
-func (g *usageShareGroupView) accountHasSpare(acc usageShareAccountView, windows []string, now time.Time) bool {
+// accountHasSpare reports whether an over-quota subscription may still use the
+// account because it has unused capacity that resets soon in every exceeded window.
+func (s *usageShareSnapshot) accountHasSpare(accountID int64, windows []string, now time.Time) bool {
+	acc := s.account(accountID)
 	for _, w := range windows {
 		reset, ok := acc.reset[w]
 		if !ok {
 			return false
 		}
-		minPct, within := g.settings.spareRule(w)
+		minPct, within := s.settings.spareRule(w)
 		if (1-acc.util[w])*100 < minPct || reset.Sub(now) > within {
 			return false
 		}
 	}
 	return true
+}
+
+func (s *usageShareSnapshot) groupHasSpare(groupID int64, windows []string, now time.Time) bool {
+	for _, id := range s.groupAccounts[groupID] {
+		if s.accountHasSpare(id, windows, now) {
+			return true
+		}
+	}
+	return false
 }
 
 func usageShareRequestIdentity(ctx context.Context) (userID, groupID int64, ok bool) {
@@ -555,19 +688,20 @@ func forkUsageShareAllowsAccount(ctx context.Context, account *Account) bool {
 	if !ok {
 		return true
 	}
-	g := snap.groups[groupID]
-	if g == nil {
+	sub := snap.subFor(userID, groupID)
+	if sub == nil {
 		return true
 	}
-	over := g.exceeded(userID)
+	over := sub.exceeded()
 	if len(over) == 0 {
 		return true
 	}
-	return g.accountHasSpare(snap.accounts[account.ID], over, e.now())
+	return snap.accountHasSpare(account.ID, over, e.now())
 }
 
 // ForkUsageShareBlocked reports whether the user must be rejected before
-// scheduling: over a limit with no group account that has spare capacity.
+// scheduling: over their subscription quota with no group account that has
+// spare capacity.
 func ForkUsageShareBlocked(groupID, userID int64) (string, bool) {
 	e := activeUsageShare.Load()
 	if e == nil {
@@ -577,253 +711,97 @@ func ForkUsageShareBlocked(groupID, userID int64) (string, bool) {
 	if snap == nil {
 		return "", false
 	}
-	g := snap.groups[groupID]
-	if g == nil {
+	sub := snap.subFor(userID, groupID)
+	if sub == nil {
 		return "", false
 	}
-	over := g.exceeded(userID)
+	over := sub.exceeded()
 	if len(over) == 0 {
 		return "", false
 	}
 	now := e.now()
-	for _, accID := range g.accountIDs {
-		if g.accountHasSpare(snap.accounts[accID], over, now) {
-			return "", false
-		}
+	if snap.groupHasSpare(groupID, over, now) {
+		return "", false
 	}
-	return g.blockMessage(userID, over, now), true
+	return sub.blockMessage(over, now), true
 }
 
-// freesAt is when the user's usage in the window drops below the limit as
-// account windows reset.
-func (g *usageShareGroupView) freesAt(userID int64, window string, now time.Time) time.Time {
-	u := g.users[userID]
-	limit := g.settings.limitFor(userID, window)
-	if u == nil || limit == nil {
+// freesAt is when the subscription's usage in the window drops below its quota
+// as account windows reset.
+func (v *usageSubView) freesAt(window string, now time.Time) time.Time {
+	q := v.sub.Quota.forWindow(window)
+	if v.usage == nil || q == nil {
 		return now
 	}
-	contrib := append([]usageContribution(nil), u.contrib[window]...)
+	contrib := append([]usageContribution(nil), v.usage.contrib[window]...)
 	sort.Slice(contrib, func(i, j int) bool { return contrib[i].resetAt.Before(contrib[j].resetAt) })
-	used := u.pct[window]
+	used := v.used(window)
 	for _, c := range contrib {
-		used -= c.pct
-		if used < *limit {
+		used -= c.x
+		if used < *q {
 			return c.resetAt
 		}
 	}
 	return now
 }
 
-func (g *usageShareGroupView) blockMessage(userID int64, windows []string, now time.Time) string {
-	parts := make([]string, 0, len(windows))
+func (v *usageSubView) freesAtAll(windows []string, now time.Time) time.Time {
 	var until time.Time
 	for _, w := range windows {
-		limit := g.settings.limitFor(userID, w)
-		var used float64
-		if u := g.users[userID]; u != nil {
-			used = u.pct[w]
-		}
-		label := "weekly"
-		if w == UsageWindow5h {
-			label = "5-hour"
-		}
-		parts = append(parts, fmt.Sprintf("%s %.1f%% of %.1f%%", label, used, *limit))
-		if t := g.freesAt(userID, w, now); t.After(until) {
+		if t := v.freesAt(w, now); t.After(until) {
 			until = t
 		}
 	}
-	msg := "Usage share limit reached (" + strings.Join(parts, ", ") + " of the account pool)."
-	if until.After(now) {
+	return until
+}
+
+func usageWindowLabel(w string) string {
+	if w == UsageWindow5h {
+		return "5-hour"
+	}
+	return "weekly"
+}
+
+func (v *usageSubView) blockMessage(windows []string, now time.Time) string {
+	parts := make([]string, 0, len(windows))
+	for _, w := range windows {
+		parts = append(parts, fmt.Sprintf("%s %.2fx of %.2fx", usageWindowLabel(w), v.used(w), *v.sub.Quota.forWindow(w)))
+	}
+	msg := "Usage quota reached (" + strings.Join(parts, ", ") + "; 1x = one Claude Pro account)."
+	if until := v.freesAtAll(windows, now); until.After(now) {
 		msg += " Frees up around " + until.In(time.Local).Format("Mon Jan 2 15:04 MST") + "."
 	}
 	return msg
 }
 
-// --- admin -----------------------------------------------------------------
+// --- validation --------------------------------------------------------------
 
-// UsageShareReportAccount shows one group account's current windows.
-type UsageShareReportAccount struct {
-	ID        int64             `json:"id"`
-	Name      string            `json:"name"`
-	Util5h    *float64          `json:"util_5h_pct"`
-	Reset5h   *time.Time        `json:"reset_5h"`
-	Util7d    *float64          `json:"util_7d_pct"`
-	Reset7d   *time.Time        `json:"reset_7d"`
-	Outside5h float64           `json:"outside_5h_pct"`
-	Outside7d float64           `json:"outside_7d_pct"`
-	ByUser5h  map[int64]float64 `json:"by_user_5h_pct"`
-	ByUser7d  map[int64]float64 `json:"by_user_7d_pct"`
+func validUsageX(v *float64, max float64) bool {
+	return v == nil || (!math.IsNaN(*v) && *v >= 0 && *v <= max)
 }
 
-// UsageShareReportUser shows one user's consumption in the group.
-type UsageShareReportUser struct {
-	UsageShareUser
-	Used5hPct  float64              `json:"used_5h_pct"`
-	Used7dPct  float64              `json:"used_7d_pct"`
-	Limit5hPct *float64             `json:"limit_5h_pct"`
-	Limit7dPct *float64             `json:"limit_7d_pct"`
-	Override   *UsageShareUserLimit `json:"override"`
-	Blocked    bool                 `json:"blocked"`
-	FreesAt    *time.Time           `json:"frees_at,omitempty"`
-}
-
-// UsageShareReport is the admin view of a group.
-type UsageShareReport struct {
-	Settings UsageShareSettings        `json:"settings"`
-	Accounts []UsageShareReportAccount `json:"accounts"`
-	Users    []UsageShareReportUser    `json:"users"`
-}
-
-func (s *adminServiceImpl) usageShare() (*usageShareEngine, error) {
-	e := activeUsageShare.Load()
-	if e == nil {
-		return nil, infraerrors.InternalServer("USAGE_SHARE_UNAVAILABLE", "usage share engine is not running")
+func validateUsageQuota(q *UsageQuota) error {
+	if q == nil {
+		return nil
 	}
-	return e, nil
-}
-
-func (s *adminServiceImpl) GetUsageShare(ctx context.Context, groupID int64) (*UsageShareReport, error) {
-	if _, err := s.groupRepo.GetByIDLite(ctx, groupID); err != nil {
-		return nil, err
-	}
-	e, err := s.usageShare()
-	if err != nil {
-		return nil, err
-	}
-	return e.report(ctx, groupID)
-}
-
-func (s *adminServiceImpl) SetUsageShare(ctx context.Context, groupID int64, input UsageShareSettings) (*UsageShareReport, error) {
-	if _, err := s.groupRepo.GetByIDLite(ctx, groupID); err != nil {
-		return nil, err
-	}
-	e, err := s.usageShare()
-	if err != nil {
-		return nil, err
-	}
-	input.GroupID = groupID
-	if err := validateUsageShareSettings(input); err != nil {
-		return nil, err
-	}
-	if err := e.store.SaveUsageShareSettings(ctx, input); err != nil {
-		return nil, err
-	}
-	e.mu.Lock()
-	err = e.rebuildLocked(ctx)
-	e.mu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	return e.report(ctx, groupID)
-}
-
-func validateUsageShareSettings(s UsageShareSettings) error {
-	pct := func(v *float64) bool { return v == nil || (*v >= 0 && *v <= 100) }
-	if !pct(s.Default5hPct) || !pct(s.Default7dPct) || s.Spare5hMinPct < 0 || s.Spare5hMinPct > 100 ||
-		s.Spare7dMinPct < 0 || s.Spare7dMinPct > 100 || s.Spare5hWithinMinutes < 0 || s.Spare7dWithinHours < 0 {
-		return infraerrors.BadRequest("INVALID_USAGE_SHARE", "percentages must be 0-100 and durations >= 0")
-	}
-	for _, l := range s.Limits {
-		if l.UserID <= 0 || !pct(l.Limit5hPct) || !pct(l.Limit7dPct) {
-			return infraerrors.BadRequest("INVALID_USAGE_SHARE", "invalid per-user limit")
-		}
+	if !validUsageX(q.Quota5hX, usageQuotaMaxX) || !validUsageX(q.Quota7dX, usageQuotaMaxX) {
+		return infraerrors.BadRequest("INVALID_USAGE_QUOTA", fmt.Sprintf("quotas must be between 0 and %d x", usageQuotaMaxX))
 	}
 	return nil
 }
 
-func (e *usageShareEngine) report(ctx context.Context, groupID int64) (*UsageShareReport, error) {
-	all, err := e.store.ListUsageShareSettings(ctx)
-	if err != nil {
-		return nil, err
+func validateUsageQuotaSettings(s UsageQuotaSettings) error {
+	if s.Spare5hMinPct < 0 || s.Spare5hMinPct > 100 || s.Spare7dMinPct < 0 || s.Spare7dMinPct > 100 ||
+		s.Spare5hWithinMinutes < 0 || s.Spare7dWithinHours < 0 {
+		return infraerrors.BadRequest("INVALID_USAGE_QUOTA_SETTINGS", "percentages must be 0-100 and durations >= 0")
 	}
-	settings := defaultUsageShareSettings(groupID)
-	for _, s := range all {
-		if s.GroupID == groupID {
-			settings = s
-		}
+	return nil
+}
+
+func validateUsageWeights(w5, w7 *float64) error {
+	ok := func(v *float64) bool { return v == nil || (*v > 0 && *v <= usageWeightMaxX) }
+	if !ok(w5) || !ok(w7) {
+		return infraerrors.BadRequest("INVALID_ACCOUNT_WEIGHT", fmt.Sprintf("weights must be > 0 and <= %d", usageWeightMaxX))
 	}
-	e.mu.Lock()
-	snap, err := e.buildSnapshot(ctx, []UsageShareSettings{settings})
-	names := make(map[int64]string, len(e.names))
-	for k, v := range e.names {
-		names[k] = v
-	}
-	e.mu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	g := snap.groups[groupID]
-	now := e.now()
-	rep := &UsageShareReport{Settings: settings, Accounts: []UsageShareReportAccount{}, Users: []UsageShareReportUser{}}
-	n := float64(len(g.accountIDs))
-	for _, accID := range g.accountIDs {
-		acc := snap.accounts[accID]
-		ra := UsageShareReportAccount{ID: accID, Name: names[accID], ByUser5h: map[int64]float64{}, ByUser7d: map[int64]float64{}}
-		for _, w := range usageWindowKinds {
-			reset, ok := acc.reset[w]
-			if !ok {
-				continue
-			}
-			util, r := 100*acc.util[w], reset
-			if w == UsageWindow5h {
-				ra.Util5h, ra.Reset5h = &util, &r
-			} else {
-				ra.Util7d, ra.Reset7d = &util, &r
-			}
-			for uid, frac := range g.perAccount[accID][w] {
-				pct := 100 * frac
-				switch {
-				case uid == 0 && w == UsageWindow5h:
-					ra.Outside5h = pct
-				case uid == 0:
-					ra.Outside7d = pct
-				case w == UsageWindow5h:
-					ra.ByUser5h[uid] = pct
-				default:
-					ra.ByUser7d[uid] = pct
-				}
-			}
-		}
-		rep.Accounts = append(rep.Accounts, ra)
-	}
-	extra := make([]int64, 0, len(g.users))
-	for uid := range g.users {
-		extra = append(extra, uid)
-	}
-	users, err := e.store.ListUsageShareUsers(ctx, groupID, extra)
-	if err != nil {
-		return nil, err
-	}
-	for _, u := range users {
-		ru := UsageShareReportUser{UsageShareUser: u, Limit5hPct: settings.limitFor(u.ID, UsageWindow5h), Limit7dPct: settings.limitFor(u.ID, UsageWindow7d)}
-		if v := g.users[u.ID]; v != nil {
-			ru.Used5hPct, ru.Used7dPct = v.pct[UsageWindow5h], v.pct[UsageWindow7d]
-		}
-		for i := range settings.Limits {
-			if settings.Limits[i].UserID == u.ID {
-				l := settings.Limits[i]
-				ru.Override = &l
-			}
-		}
-		if over := g.exceeded(u.ID); len(over) > 0 && n > 0 {
-			ru.Blocked = true
-			for _, accID := range g.accountIDs {
-				if g.accountHasSpare(snap.accounts[accID], over, now) {
-					ru.Blocked = false
-				}
-			}
-			var until time.Time
-			for _, w := range over {
-				if t := g.freesAt(u.ID, w, now); t.After(until) {
-					until = t
-				}
-			}
-			if until.After(now) {
-				ru.FreesAt = &until
-			}
-		}
-		rep.Users = append(rep.Users, ru)
-	}
-	sort.Slice(rep.Users, func(i, j int) bool { return rep.Users[i].Used7dPct > rep.Users[j].Used7dPct })
-	return rep, nil
+	return nil
 }
