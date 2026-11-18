@@ -84,7 +84,13 @@ jobs:
 
       - name: Backend unit tests
         working-directory: backend
-        run: go test -tags=unit ./...
+        # This upstream test measures whole-process heap growth, so other tests running
+        # alongside it make it flaky (it fails in upstream's own CI too). Skip it in the
+        # full run and run it on its own, where the measurement is reliable.
+        run: |
+          flaky='^TestInflightEstimate_AccountMappingNoDBAndBoundedMemory$'
+          go test -tags=unit -skip "$flaky" ./...
+          go test -tags=unit -count=1 -run "$flaky" ./internal/service/
 
       - name: Push merge
         if: steps.merge.outputs.merged == 'true'
